@@ -88,6 +88,11 @@ with tab_in:
                  and d["name"].startswith("turtlebot3")]
         roots_set = set(roots)
         blast = {n: len(nx.ancestors(G, n) & roots_set) for n, d in G.nodes(data=True) if d.get("layer") in ("ros", "source")}
+        RT_TAGS = {"depend", "exec_depend", "run_depend", "build_export_depend"}
+        RG = nx.DiGraph()
+        RG.add_nodes_from(G.nodes)
+        RG.add_edges_from((u, v) for u, v, e in G.edges(data=True) if set(e.get("type", "").split(",")) & RT_TAGS)
+        rblast = {n: len(nx.ancestors(RG, n) & roots_set) for n in blast}
         Y = len(roots)
         net = Network(height="560px", width="100%", directed=True, bgcolor="#0e1117", font_color="white")
         colour = {"source": "#ff7f0e", "ros": "#1f77b4", "apt": "#2ca02c", "pip": "#9467bd"}
@@ -105,7 +110,7 @@ with tab_in:
                          color={"background": colour.get(d["layer"], "#888"), "border": AMBER if has_cve else colour.get(d["layer"], "#888"),
                                 "highlight": {"background": colour.get(d["layer"], "#888"), "border": "#fff"}},
                          borderWidth=5 if has_cve else 1, font={"size": 20, "color": "#ffffff", "strokeWidth": 3, "strokeColor": "#0e1117"},
-                         title=f"{d['name']} ({d['layer']} {d.get('version', '')})\nblast radius: {br} of {Y} TurtleBot3 packages depend on it (directly or transitively)"
+                         title=f"{d['name']} ({d['layer']} {d.get('version', '')})\nbuild-time blast radius: {br} of {Y} TurtleBot3 packages (all dependency types)\nruntime blast radius: {rblast.get(n, 0)} of {Y} (depend/exec_depend/build_export_depend)"
                          + ("\nruntime CVEs in libs its own binaries link: " + ", ".join(f"{k} ({v['cves']} CVEs, worst {v['worst']}) via {v['binary']}" for k, v in list(amber[d["name"]].items())[:4]) if has_cve else ""))
         for u, w in G.edges(sub):
             if u in sub and w in sub:
@@ -119,7 +124,7 @@ with tab_in:
                     sbr = len((nx.ancestors(G, oid) | {oid}) & roots_set)
                     net.add_node(f"sus:{dep}", label=dep, shape="dot", size=24, color={"background": RED, "border": "#ffffff"}, borderWidth=3,
                                  font={"size": 20, "color": "#ffffff", "strokeWidth": 3, "strokeColor": "#0e1117"},
-                                 title=f"{dep}\n{f['risk']} - {f['type']} ({f['file']}:{f['line']})\nblast radius: {sbr} of {Y} TurtleBot3 packages would depend on it")
+                                 title=f"{dep}\n{f['risk']} - {f['type']} ({f['file']}:{f['line']})\nbuild-time blast radius: {sbr} of {Y} TurtleBot3 packages")
                     net.add_edge(oid, f"sus:{dep}", color=RED, width=3)
         net.set_options(json.dumps({
             "physics": {"enabled": True, "solver": "forceAtlas2Based",
@@ -130,13 +135,19 @@ with tab_in:
             "return network;",
             "network.once('stabilizationIterationsDone', function(){ network.setOptions({physics:{enabled:false}}); network.fit(); });\n return network;")
         components.html(html, height=580)
-        st.caption("orange = TurtleBot3 workspace, blue = ROS packages in the image (size = blast radius), red = suspicious/planted, "
-                   "amber border = runtime CVEs in a library that the package's OWN executables/libraries link (ldd) · layout is frozen after stabilisation; drag nodes to rearrange")
-        hubs = sorted(((blast[n], len(nx.ancestors(G, n)), d["name"]) for n, d in G.nodes(data=True) if d.get("layer") == "ros"), reverse=True)[:5]
-        st.markdown("**Top 5 hubs (blast radius)**")
-        for k, _, name in hubs:
-            st.markdown(f"- `{name}` — if this package were compromised, **{k} of {Y}** TurtleBot3 packages would be affected")
-        st.caption(f"Blast radius = number of the {Y} TurtleBot3 workspace packages that depend on a package directly or transitively (all dependency types). Ties are broken by total dependents in the graph.")
+        st.caption("orange = TurtleBot3 workspace, blue = ROS packages in the image (size = build-time blast radius), red = suspicious/planted, "
+                   "amber border = runtime CVEs in a library that the package's OWN executables/libraries link (ldd, incl. their linked libraries). "
+                   "Ubiquitous base libraries (libc6, libstdc++6, libgcc-s1, libpython3.12*) are ignored for the amber ring (their CVEs stay in the CVE list and funnel). "
+                   "Layout is frozen after stabilisation; drag nodes to rearrange.")
+        hc1, hc2 = st.columns(2)
+        for col, title, br_map in ((hc1, "Top 5 hubs — build-time blast radius", blast), (hc2, "Top 5 hubs — runtime blast radius", rblast)):
+            hubs = sorted(((br_map[n], len(nx.ancestors(G, n)), d["name"]) for n, d in G.nodes(data=True) if d.get("layer") == "ros"), reverse=True)[:5]
+            with col:
+                st.markdown(f"**{title}**")
+                for k, _, name in hubs:
+                    st.markdown(f"- `{name}` — if this package were compromised, **{k} of {Y}** TurtleBot3 packages would be affected")
+        st.caption(f"Build-time = all dependency types; runtime = depend / exec_depend / build_export_depend only. Y = the {Y} TurtleBot3 workspace packages. "
+                   "Ties are broken by total dependents in the graph. Build-tool compromise is how the SolarWinds and XZ Utils attacks worked, so build-time hubs matter.")
     except Exception as e:  # graph is a nicety, never block the demo
         st.info(f"Graph unavailable: {e}")
 
@@ -193,36 +204,47 @@ with tab_risk:
         st.divider()
         st.subheader("All risks")
     rows = []
+    def band(x):
+        return "high" if x >= 9 else "medium" if x >= 4 else "low"
     for f in findings:
-        rows.append({"kind": "suspicious", "id": f["id"], "risk": f["risk"], "layer": f["layer"],
-                     "component": f["component"], "summary": f"{f['type']}: {f['reason']}", "priority": 100.0 - RISK_RANK[f["risk"]], "ref": ("f", f["id"])})
+        rows.append({"kind": "suspicious", "id": f["id"], "tier": 0, "priority": 100.0 - RISK_RANK[f["risk"]], "level": f["risk"],
+                     "exposure": "—", "reachable": "—", "trivy": "", "layer": f["layer"], "component": f["component"],
+                     "why": f"{f['type']}: {f['reason']}", "ref": ("f", f["id"])})
     for i, c in enumerate(cves):
-        rows.append({"kind": "CVE", "id": c["id"], "risk": c["severity"].lower(), "layer": c["layer"],
-                     "component": f"{c['package']} {c['installed']}",
-                     "summary": f"{c.get('exposure', '?')} · fixed in {c['fixed']}" if c["fixed"] else f"{c.get('exposure', '?')} · no fix available",
-                     "priority": c.get("score", 0.0), "ref": ("c", i)})
+        rch = bool(c.get("reachable"))
+        tier = 1 if (c.get("runtime") and rch) else 2
+        why = c["priority_reasons"][1] if c.get("priority_reasons") else ""
+        rows.append({"kind": "CVE", "id": c["id"], "tier": tier, "priority": c.get("score", 0.0), "level": band(c.get("score", 0.0)),
+                     "exposure": c.get("exposure", "?"), "reachable": "yes" if rch else "no", "trivy": c["severity"].lower(),
+                     "layer": c["layer"], "component": f"{c['package']} {c['installed']}",
+                     "why": why + (f" · fix {c['fixed']}" if c["fixed"] else " · no fix listed"), "ref": ("c", i)})
     rk = pd.DataFrame(rows)
-    rk["rank"] = rk["risk"].map(lambda r: RISK_RANK.get(r, 9))
-    rk["_k"] = (rk["kind"] != "suspicious").astype(int)
-    sort_by = st.radio("Sort by", ["Priority score (findings first, then CVEs by score)", "Severity"], horizontal=True)
-    rk = (rk.sort_values(["priority", "rank"], ascending=[False, True]) if sort_by.startswith("Priority")
-          else rk.sort_values(["rank", "_k", "priority"], ascending=[True, True, False])).reset_index(drop=True)
-    f1, f2, f3 = st.columns([2, 2, 3])
+    rk["_sev"] = rk["trivy"].map(lambda r: RISK_RANK.get(r, -1))
+    sort_by = st.radio("Sort by", ["Guardian priority (suspicious findings, then runtime+reachable CVEs, then the rest)", "Raw Trivy severity"], horizontal=True)
+    rk = (rk.sort_values(["tier", "priority"], ascending=[True, False]) if sort_by.startswith("Guardian")
+          else rk.sort_values(["_sev", "priority"], ascending=[True, False])).reset_index(drop=True)
+    f1, f2, f3, f4 = st.columns([2, 2, 2, 3])
     lay = f1.multiselect("Layer", sorted(rk["layer"].unique()))
-    rsk = f2.multiselect("Risk", ["critical", "high", "medium", "low"], default=["critical", "high"])
-    srch = f3.text_input("Search id / component / summary", "")
+    expo = f2.multiselect("Exposure", ["runtime", "build/dev-only", "base image only"])
+    lvl = f3.multiselect("Priority level", ["high", "medium", "low", "critical"], help="CVEs: Guardian band by score; findings: their risk level")
+    srch = f4.text_input("Search id / component / why", "")
     v = rk
     if lay:
         v = v[v["layer"].isin(lay)]
-    if rsk:
-        v = v[v["risk"].isin(rsk)]
+    if expo:
+        v = v[v["exposure"].isin(expo)]
+    if lvl:
+        v = v[v["level"].isin(lvl)]
     if srch:
-        m = v[["id", "component", "summary"]].astype(str).apply(lambda c: c.str.contains(srch, case=False)).any(axis=1)
+        m = v[["id", "component", "why"]].astype(str).apply(lambda c: c.str.contains(srch, case=False)).any(axis=1)
         v = v[m]
     v = v.reset_index(drop=True)
-    st.caption(f"{len(v)} rows ({(v['kind']=='suspicious').sum()} suspicious findings, {(v['kind']=='CVE').sum()} CVEs) — click a row for evidence")
-    show = v.assign(risk=v["risk"].map(lambda r: f"{ICON.get(r, '')} {r}"))[["risk", "priority", "kind", "id", "layer", "component", "summary"]]
-    st.caption("CVEs from Trivy and suspicious changes from the diff in one list; priority = severity × exposure × reachability × provenance × fix (findings are always above CVEs). Click a row for its evidence.")
+    st.caption(f"{len(v)} rows ({(v['kind']=='suspicious').sum()} suspicious findings, {(v['kind']=='CVE').sum()} CVEs) — click a row for evidence and priority reasons")
+    show = v.assign(level=v["level"].map(lambda r: f"{ICON.get(r, '')} {r}")).rename(
+        columns={"level": "priority level", "trivy": "Trivy severity"})[
+        ["priority level", "priority", "kind", "id", "exposure", "reachable", "Trivy severity", "layer", "component", "why"]]
+    st.caption("Guardian priority = Trivy severity × exposure × reachability × provenance × fix availability. Suspicious findings come first, then runtime + reachable CVEs, "
+               "then the rest by score. `linux-libc-dev` rows rank low: build-only kernel headers. Raw Trivy severity is shown for reference only.")
     ev = st.dataframe(show, width='stretch', hide_index=True, height=380,
                       on_select="rerun", selection_mode="single-row")
     sel = ev.selection.rows if ev and ev.selection else []
@@ -253,7 +275,7 @@ with tab_risk:
                 if c.get("title"):
                     st.write(c["title"])
                 st.markdown("Path from TurtleBot3: " + (" → ".join(f"`{p}`" for p in c["path"]) if c["path"] else "_not reachable in the graph_"))
-                linkers = sorted(k for k, v in prio.get("ros_amber", {}).items() if c["package"] in v)
+                linkers = sorted(prio.get("ros_links_all", {}).get(c["package"], []))
                 if linkers:
                     st.write(f"ROS packages whose own binaries link `{c['package']}` ({len(linkers)}): " + ", ".join(f"`{x}`" for x in linkers[:12]) + (" …" if len(linkers) > 12 else ""))
                 if c.get("url"):

@@ -25,6 +25,7 @@ BUILD_ONLY = re.compile(
     r"autoconf|automake|libtool|m4|patch|flex|bison|cython3?|python3-dev|python3-pytest|python3-setuptools-scm)(-\d+)?(-|$)|-doc$|"
     r"^ament-(lint|cppcheck|flake8|pep257|copyright|xmllint|uncrustify|cpplint|mypy)|^ros-jazzy-ament-(lint|cppcheck|flake8|pep257|copyright|xmllint|uncrustify|cpplint|mypy)|"
     r"^ros-jazzy-.*-(dev|dbgsym)$|^ros-jazzy-gtest|^googletest|^libgtest)")
+BASE_LIBS = re.compile(r"^(libc6|libstdc\+\+6|libgcc-s1|libpython3\.12.*)$")  # ubiquitous: do not make a ROS package "amber" on their own
 BASE = {"CRITICAL": 10, "HIGH": 7, "MEDIUM": 4, "LOW": 1, "UNKNOWN": 2}
 EXPO_MULT = {"runtime": 1.0, "build/dev-only": 0.2, "base image only": 0.4}
 PROV_MULT = {"Ubuntu archive": 1.0, "ROS apt repo": 1.0, "PyPI": 1.15, "unknown": 1.3}
@@ -240,16 +241,18 @@ def main():
     for c in cves:
         if c["runtime"]:
             by_deb[c["package"]].append(c)
-    ros_amber = {}
+    ros_amber, ros_links_all = {}, collections.defaultdict(list)
     for pkg, debs in reach["own_links"].items():
         if f"ros:{pkg}" not in rt:
             continue
+        for d in debs:
+            ros_links_all[d].append(pkg)
         libs = {d: {"binary": b, "cves": len(by_deb[d]), "worst": max(by_deb[d], key=lambda c: SEV.get(c["severity"], 0))["severity"]}
-                for d, b in debs.items() if d in by_deb}
+                for d, b in debs.items() if d in by_deb and not BASE_LIBS.match(d)}
         if libs:
             ros_amber[pkg] = libs
     (OUT / "cves.json").write_text(json.dumps(cves, indent=1))
-    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber}, indent=1))
+    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber, "ros_links_all": ros_links_all}, indent=1))
     print(f"funnel: {len(cves)} CVEs -> {n_tree} in robot's tree -> {n_rt} runtime -> {n_reach} reachable -> top 10")
     print(f"launch seeds: {len(seeds)} pkgs; launched (recursive, in image): {len(reach['launched_pkgs'])}; binaries ldd'd: {reach['n_binaries']}; "
           f"linked debs: {len(linked)}; python-imported debs: {len(imported)}")
