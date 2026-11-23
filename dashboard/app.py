@@ -224,6 +224,30 @@ with tab_risk:
                               "evidence": i["evidence"]} for i in t["items"]]
                     st.dataframe(pd.DataFrame(rows_), width='stretch', hide_index=True)
                 st.markdown("CVE IDs: " + ", ".join(f"`{i}`" for i in t["cve_ids"]))
+        MAL = ("obfuscated_payload", "credential_access", "network_exfiltration", "download_and_execute", "antivirus_hit")
+        mal = [f for f in findings if f["type"] in MAL]
+        st.divider()
+        st.subheader("Malware-like behaviour")
+        av = load("av.json", {})
+        st.caption("Static analysis only — nothing is executed or installed. Base64/hex strings in setup.py and scripts are decoded and the decoded text is scanned too; "
+                   "the planted workspace is scanned with ClamAV. All URLs are under the reserved .invalid domain. Evidence below is verified tool output.")
+        if av:
+            st.markdown(f"Antivirus engine: **{av.get('engine')}** · {av.get('version', '')}" + (f" · note: {av['note']}" if av.get("note") else ""))
+        if not mal:
+            st.info("No malware-like behaviour found.")
+        for f in mal:
+            with st.expander(f"{ICON.get(f['risk'], '')} {f['type']} · `{f['file']}:{f['line']}` · {f['component']}", expanded=f["type"] == "obfuscated_payload"):
+                st.markdown(f"**Why:** {f['reason']}")
+                if f.get("encoded"):
+                    st.markdown("Encoded line:")
+                    st.code(f["encoded"], language="python")
+                    st.markdown("Decoded snippet:")
+                    st.code(f.get("decoded") or "", language="python")
+                else:
+                    st.code(f["evidence"], language="text")
+                ai = agent.get(f["id"])
+                if ai:
+                    st.markdown("**AI inference** (not evidence): " + ai["verdict_text"])
         st.divider()
         st.subheader("All risks")
     rows = []

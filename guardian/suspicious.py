@@ -5,7 +5,7 @@ Usage: suspicious.py [BASE=main] [HEAD=planted]
 Writes out/changes.json (all hunks) and out/findings.json, then scores against GROUND_TRUTH.json.
 Detection only - nothing is executed; setup.py files are parsed with ast, never imported.
 """
-import ast, difflib, json, os, re, subprocess, sys, collections
+import ast, base64, binascii, difflib, json, os, re, shutil, subprocess, sys, collections
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -173,6 +173,147 @@ def typosquat_reason(name, official):
     return None
 
 
+# ------------------------------------------------------------------ behaviour analysis (text only, nothing is executed)
+B64 = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
+HEXRE = re.compile(r"\b(?:[0-9a-fA-F]{2}){16,}\b")
+BIN_MAGIC = {b"\x89PNG": "PNG image", b"GIF8": "GIF image", b"\xff\xd8\xff": "JPEG image", b"\x7fELF": "ELF binary",
+             b"PK\x03\x04": "ZIP archive", b"%PDF": "PDF document"}
+CRED_RE = re.compile(r"~/\.ssh|\.ssh/id_|id_rsa|\.npmrc|\.netrc|\.aws/credentials|\.docker/config\.json|"
+                     r"(os\.environ|getenv)[^\n]{0,60}(AWS_|TOKEN|SECRET|PASSWORD|API_?KEY)")
+NET_RE = re.compile(r"(requests|httpx)\.(post|put)\s*\(|urlopen\([^)]*data\s*=|method\s*=\s*['\"]POST['\"]|socket\.(socket|create_connection)")
+URL_RE = re.compile(r"https?://[^\s\"')]+")
+DLEX_RE = re.compile(r"(curl|wget)\b[^\n]*https?://\S+[^\n]*(chmod\s+\+x|\|\s*(ba|z)?sh\b|&&\s*[./]|;\s*[./])")
+EXEC_RE = re.compile(r"\b(exec|eval|compile)\s*\(")
+
+
+def decode_blobs(line):
+    """base64 / hex strings in a source line -> [{encoding, encoded, kind: text|binary|noise, text}] (decode only, never run)."""
+    out = []
+    cands = [("base64", m.group(0)) for m in B64.finditer(line)] + [("hex", m.group(0)) for m in HEXRE.finditer(line)]
+    for enc, tok in cands:
+        try:
+            raw = base64.b64decode(tok + "=" * (-len(tok) % 4), validate=True) if enc == "base64" else bytes.fromhex(tok)
+        except (binascii.Error, ValueError):
+            continue
+        magic = next((v for k, v in BIN_MAGIC.items() if raw.startswith(k)), None)
+        if magic:
+            out.append({"encoding": enc, "encoded": tok, "kind": f"binary ({magic})", "text": ""})
+            continue
+        try:
+            txt = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        printable = sum(c.isprintable() or c in "\n\t\r" for c in txt)
+        if len(txt) >= 12 and printable / len(txt) >= 0.95:
+            out.append({"encoding": enc, "encoded": tok, "kind": "text", "text": txt})
+    return out
+
+
+def behaviour_scan(by_file, add, pkg_name_of, show):
+    for f, cs in sorted(by_file.items()):
+        if not f.endswith((".py", ".sh")) or cs[0]["status"] == "deleted":
+            continue
+        src = show(f)
+        lines = src.splitlines()
+        comp = pkg_name_of(os.path.dirname(f) + "/package.xml") or os.path.basename(os.path.dirname(f))
+        seen = set()
+
+        def emit(type_, line_no, encoded, decoded, evidence, risk, reason):
+            if (type_, line_no) in seen:
+                return
+            seen.add((type_, line_no))
+            add(type_, comp, "source", f, line_no, None, (encoded or lines[line_no - 1]).strip()[:120], evidence, risk, reason,
+                encoded=(lines[line_no - 1].strip() if encoded else None), decoded=decoded)
+
+        for i, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                continue
+            # plain-text behaviour
+            if CRED_RE.search(line):
+                emit("credential_access", i, None, None, f"{f}:{i} touches credentials: {line.strip()}", "critical",
+                     "code reads SSH keys / cloud credentials / secret environment variables")
+            if NET_RE.search(line) and URL_RE.search(line):
+                emit("network_exfiltration", i, None, None, f"{f}:{i} sends data to {URL_RE.search(line).group(0)}: {line.strip()}", "high",
+                     "code POSTs data to a remote URL")
+            if DLEX_RE.search(line):
+                emit("download_and_execute", i, None, None, f"{f}:{i} downloads and runs a remote program: {line.strip()}", "critical",
+                     "downloads a binary from a URL, makes it executable and runs it (miner-style dropper)")
+            # encoded payloads
+            for b in decode_blobs(line):
+                if b["kind"] != "text":
+                    continue  # e.g. a base64 PNG icon: binary media, not code
+                txt = b["text"]
+                snippet = txt.strip().replace("\r", "")[:500]
+                near = "\n".join(lines[max(0, i - 4): i + 3])
+                hits = []
+                if CRED_RE.search(txt):
+                    hits.append("credential_access")
+                    emit("credential_access", i, b["encoded"], snippet,
+                         f"{f}:{i} ENCODED ({b['encoding']}): {line.strip()}\nDECODED: {snippet}", "critical",
+                         "decoded payload reads SSH keys / cloud credentials / secret environment variables")
+                if NET_RE.search(txt) and URL_RE.search(txt):
+                    hits.append("network_exfiltration")
+                    emit("network_exfiltration", i, b["encoded"], snippet,
+                         f"{f}:{i} ENCODED ({b['encoding']}): {line.strip()}\nDECODED: {snippet}", "critical" if "credential_access" in hits else "high",
+                         f"decoded payload POSTs data to {URL_RE.search(txt).group(0)}")
+                if DLEX_RE.search(txt):
+                    hits.append("download_and_execute")
+                    emit("download_and_execute", i, b["encoded"], snippet,
+                         f"{f}:{i} ENCODED ({b['encoding']}): {line.strip()}\nDECODED: {snippet}", "critical", "decoded payload downloads and runs a program")
+                if hits or EXEC_RE.search(near) or re.search(r"\bimport\s+\w+|\bdef\s+\w+\(", txt):
+                    emit("obfuscated_payload", i, b["encoded"], snippet,
+                         f"{f}:{i} ENCODED ({b['encoding']}): {line.strip()}\nDECODED: {snippet}\n(decoded text flagged: {', '.join(hits) or 'code passed to exec/eval'})",
+                         "critical" if hits else "high", "hides code in a base64/hex string that is decoded at install time (obfuscation)")
+
+
+# ------------------------------------------------------------------ antivirus (ClamAV via Docker, fallback: EICAR signature string)
+CLAM_IMAGE = os.environ.get("CLAM_IMAGE", "clamav/clamav:stable")
+CLAM_DB_VOL = "guardian_clamdb"
+
+
+def antivirus_scan():
+    """Extract branch HEAD into out/planted_ws, generate the EICAR test file there (scan time), scan with ClamAV.
+    Returns (hits[(relpath, signature)], info dict)."""
+    ws = OUT / "planted_ws"
+    shutil.rmtree(ws, ignore_errors=True)
+    ws.mkdir(parents=True)
+    arch = subprocess.run(["git", "-C", str(TARGET), "archive", HEAD], capture_output=True, check=True).stdout
+    subprocess.run(["tar", "-x", "-C", str(ws)], input=arch, check=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import make_eicar
+    make_eicar.main(str(ws))
+    info = {"engine": "clamav", "image": CLAM_IMAGE, "note": ""}
+
+    def clam(args, timeout):
+        return subprocess.run(["docker", "run", "--rm", "-v", f"{ws}:/scan:ro", "-v", f"{CLAM_DB_VOL}:/var/lib/clamav",
+                               "--entrypoint", args[0], CLAM_IMAGE, *args[1:]], capture_output=True, text=True, timeout=timeout)
+    try:
+        r = clam(["clamscan", "-r", "--infected", "--no-summary", "/scan"], 600)
+        if "No supported database files" in (r.stdout + r.stderr) or r.returncode == 2:
+            fr = subprocess.run(["docker", "run", "--rm", "-v", f"{CLAM_DB_VOL}:/var/lib/clamav", "--entrypoint", "freshclam", CLAM_IMAGE],
+                                capture_output=True, text=True, timeout=300)
+            info["freshclam"] = (fr.stdout + fr.stderr)[-300:]
+            r = clam(["clamscan", "-r", "--infected", "--no-summary", "/scan"], 600)
+            if r.returncode == 2:
+                raise RuntimeError((r.stdout + r.stderr)[-300:])
+        hits = [(m.group(1), m.group(2)) for m in re.finditer(r"^/scan/(.+?): (\S+) FOUND$", r.stdout, re.M)]
+        v = clam(["clamscan", "--version"], 60).stdout.strip()
+        info["version"] = v
+        return hits, info
+    except Exception as e:  # ClamAV unavailable / signature download failed or timed out -> standard EICAR string match
+        import make_eicar as me
+        hits = []
+        for p in ws.rglob("*"):
+            if p.is_file() and p.stat().st_size < 1_000_000:
+                try:
+                    if me.EICAR in p.read_text(errors="ignore"):
+                        hits.append((str(p.relative_to(ws)), "Eicar-Test-Signature (string match)"))
+                except OSError:
+                    pass
+        info.update(engine="signature-string fallback (ClamAV unavailable)", note=f"{type(e).__name__}: {e}"[:300])
+        return hits, info
+
+
 # ------------------------------------------------------------------ detection
 def detect(changes):
     ros_names, other_names = known_names()
@@ -296,6 +437,12 @@ def detect(changes):
                 add("tag_pinned_action", f"{m.group(1)}@{m.group(2)}", "ci", f, c["line"], (c["old"] or "").strip() or None,
                     c["new"].strip(), f"{f}:{c['line']} action {m.group(1)} pinned to mutable ref '{m.group(2)}' instead of a commit SHA",
                     "medium", "a tag can be moved to malicious code; pin to a full commit SHA")
+    behaviour_scan(by_file, add, pkg_name_of, show)
+    hits, av = antivirus_scan()
+    (OUT / "av.json").write_text(json.dumps(av, indent=1))
+    for rel, sig in hits:
+        add("antivirus_hit", sig, "source", rel, 0, None, sig, f"{av['engine']}: {rel}: {sig} FOUND (scan of the planted workspace extracted to out/planted_ws)",
+            "high", "antivirus signature match (EICAR is the standard harmless AV test file)")
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     findings.sort(key=lambda x: (order[x["risk"]], x["id"]))
     return findings

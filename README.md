@@ -25,6 +25,10 @@ AI verdicts need a local Ollama on `127.0.0.1:11435` (e.g. `OLLAMA_HOST=127.0.0.
 orange = TurtleBot3 workspace · blue = ROS packages in the image (size = build-time blast radius) · red = suspicious/planted · **amber ring = a runtime ROS package (reached via depend/exec_depend/build_export_depend) whose OWN executables/libraries link DIRECTLY (readelf `NEEDED` entries, not the transitive ldd chain) a library with runtime CVEs.** Ubiquitous base libraries (libc6, libstdc++6, libgcc-s1, libpython3.12*) are ignored for the ring only; their CVEs stay in the CVE list and funnel.
 Blast radius = how many of the 12 TurtleBot3 workspace packages depend on a package, **build-time** (all dependency types) and **runtime** (depend/exec_depend/build_export_depend). Build-tool compromise is how the SolarWinds and XZ Utils attacks worked, so build-time hubs matter.
 
+## Fake-malware test (P7-P9, decoy D2) - nothing is ever executed
+On the local `planted` branch of `target/`: P7 `rclpy_utils` (typosquat of rclpy; setup.py holds a base64 payload that, decoded, would read `~/.ssh/id_rsa` + `AWS_SECRET_ACCESS_KEY` and POST them to `exfil.example.invalid`), P8 (a line that would download and run a "miner" from `miner.example.invalid`), P9 (the standard EICAR test file, generated at scan time by `guardian/make_eicar.py` into `out/planted_ws`, never committed; the string is assembled from pieces), decoy D2 `robot_status_icons` (base64 PNG icon, must not be flagged). The fixture code is gated behind an env var that is never set and uses only reserved `.invalid` hosts.
+Detection: `suspicious.py` decodes base64/hex strings (binary such as PNG is recognised and ignored) and scans the decoded text for credential access, POST exfiltration, download-and-execute and obfuscation, showing the encoded line AND the decoded snippet; ClamAV (official `clamav/clamav` Docker image, signatures shipped in the image) scans the extracted planted workspace, with an EICAR-string fallback if ClamAV is unavailable. The agent has a `decode_payload(file, line)` tool.
+
 ## Detection rules (suspicious.py)
 unexpected new dependency · typosquat (edit distance <= 2 of a real package, or official prefix `nav2_ ros_ rclpy turtlebot3_` while not in the official list) · install-time code in setup.py (AST: file writes, subprocess, network, eval/exec, cmdclass hooks; never executed) · branch-pinned repos · curl|bash · unpinned base image · unofficial apt source · tag-pinned CI actions.
 
@@ -40,7 +44,7 @@ Sorted by Guardian priority, not raw Trivy severity: suspicious findings first, 
 ## Results (this run)
 - Components: apt 1663, pip 138, ROS 375, source 19, CI 1, image 2. Relations: 12 workspace root, 34 direct, 1708 transitive, 545 base image only (incl. unresolved rosdep keys).
 - **CVE funnel: 3,444 CVEs -> 3,389 in the robot's tree -> 1,484 runtime -> 53 reachable -> top 10.** The top 10 are libc6 / libassimp5 / libtinyxml2 CVEs linked by Nav2 and rviz2 binaries. `linux-libc-dev` (1,005 CVEs) scores low: "build-only kernel headers".
-- Planted risks found **6/6**, false alarms **0**, decoy `robot_battery_monitor` not flagged (8 findings: P1 and P2 also raise a typosquat finding; P4 needs unpinned-base + curl|bash).
+- Planted risks found **9/9** (P1-P6 supply chain, P7-P9 fake malware), false alarms **0**, both decoys (`robot_battery_monitor`, `robot_status_icons`) not flagged; 15 findings in total (several planted risks raise more than one finding; P7 needs typosquat + obfuscated payload + credential access + exfiltration).
 - AI investigator (qwen3:1.7b via Ollama): 7 critical/high findings, 7 grounded model verdicts, 0 template fallbacks in the final run. In an earlier run one answer mentioned a file no tool had returned and was rejected -> template, so the check does trigger. The verdict is nondeterministic between runs despite temperature 0.
 
 ## Limitations

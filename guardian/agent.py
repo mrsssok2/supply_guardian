@@ -27,6 +27,7 @@ TOOLS_HELP = """Tools (reply with JSON only):
  {"tool":"git_diff","args":{"file":"<repo-relative path>"}}                     - diff main..planted for one file
  {"tool":"dependency_path","args":{"component":"<package name>"}}                - dependency path from the turtlebot3 packages
  {"tool":"scan_setup_py","args":{"path":"<path to setup.py>"}}                   - AST scan for install-time file writes/subprocess/network/eval
+ {"tool":"decode_payload","args":{"file":"<repo-relative path>","line":8}}       - decode (never run) base64/hex strings on that line and show encoded + decoded text
 When you have enough facts reply with the final answer:
  {"verdict":"malicious|suspicious|benign","reasons":["<reason 1>","<reason 2>"],"confidence":"low|medium|high"}
 Replace the <reason> placeholders with real reasons. Rules: use ONLY facts returned by tools. Do not mention any file, line, number or package that no tool returned.
@@ -88,8 +89,30 @@ def t_scan_setup_py(path):
     return "\n".join(f"{path}:{ln} [{k}] {t}" for ln, k, t in hits) + f"\ninstall hook (cmdclass) overridden: {hooked}"
 
 
+def t_decode_payload(file, line):
+    file, line = _safe_rel(file), int(line)
+    src = S.git("show", f"planted:{file}")
+    if not src:
+        return f"file not found on branch planted: {file}"
+    lines = src.splitlines()
+    if not 1 <= line <= len(lines):
+        return f"{file} has {len(lines)} lines; line {line} is out of range"
+    blobs = S.decode_blobs(lines[line - 1])
+    if not blobs:
+        return f"{file}:{line}: no base64/hex string found on this line: {lines[line - 1].strip()[:200]}"
+    out = []
+    for b in blobs:
+        if b["kind"] == "text":
+            out.append(f"{file}:{line} ENCODED ({b['encoding']}): {b['encoded']}\nDECODED TEXT:\n{b['text'][:600]}")
+        else:
+            out.append(f"{file}:{line} ENCODED ({b['encoding']}): {b['encoded'][:60]}...\nDECODED: {b['kind']} - binary data, not code")
+    return "\n".join(out)
+
+
 def run_tool(name, args, finding):
     try:
+        if name == "decode_payload":
+            return t_decode_payload(args.get("file") or args.get("path"), args.get("line"))
         if name == "read_file":
             return t_read_file(**{k: v for k, v in args.items() if k in ("path", "start", "end")})
         if name == "git_diff":
@@ -144,6 +167,11 @@ def template(f):
         "typosquat_name": ("suspicious", "The package name imitates an official package family but is not one"),
         "branch_pinned_repo": ("suspicious", "A source dependency follows a moving branch instead of a fixed commit"),
         "unpinned_base_image": ("suspicious", "The base image has no content digest, so it can change silently"),
+        "obfuscated_payload": ("malicious", "A base64 string in setup.py is decoded into code at install time"),
+        "credential_access": ("malicious", "The code reads SSH keys or secret environment variables"),
+        "network_exfiltration": ("malicious", "The code sends data to a remote URL"),
+        "download_and_execute": ("malicious", "The code downloads a program, makes it executable and runs it"),
+        "antivirus_hit": ("suspicious", "ClamAV matched an antivirus signature (the standard harmless test file)"),
         "tag_pinned_action": ("suspicious", "A CI action is pinned to a mutable tag instead of a commit SHA"),
     }.get(f["type"], ("suspicious", "The change matches a supply-chain risk rule"))
     return t[0], [f"{t[1]} (rule-based template; evidence is {f['file']} line {f['line']})."], "low"
@@ -204,6 +232,8 @@ def main():
                 if fv in VERDICTS and rs and not bad:
                     entry.update(verdict=fv, reasons=rs[:3], confidence=str((final or {}).get("confidence", "low")).lower(),
                                  source=f"ollama:{model} (grounding check passed)")
+                    if fv == "malicious" and f["type"] == "antivirus_hit" and "eicar" in f["component"].lower():
+                        entry.update(verdict="suspicious", note="capped: EICAR is the standard harmless antivirus test file, not real malware")
                     if fv == "malicious" and f["type"] in HYGIENE:
                         entry.update(verdict="suspicious", note="capped: unpinned/branch/tag pins are hygiene risks, not proof of malice")
                 else:

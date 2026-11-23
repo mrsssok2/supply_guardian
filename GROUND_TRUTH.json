@@ -1,23 +1,139 @@
 {
-  "description": "Planted (harmless, local-only) risks on target branch 'planted' vs 'main'. A risk counts as FOUND when every type in required_types is reported for a file in files. Findings of allowed_extra_types in those files are not false alarms.",
+  "description": "Planted (harmless, local-only) risks (P1-P6 hygiene/supply-chain, P7-P9 fake-malware fixtures that are never executed; all URLs under .invalid) on target branch 'planted' vs 'main'. A risk counts as FOUND when every type in required_types is reported for a file in files. Findings of allowed_extra_types in those files are not false alarms.",
   "planted": [
-    {"id": "P1", "title": "nav2_param_utils: setup.py install-time code edits a copy of Nav2 params (obstacle_layer off, max_vel_x 0.22->0.9)",
-     "files": ["robot_ws/src/nav2_param_utils/setup.py", "robot_ws/src/nav2_param_utils/package.xml"],
-     "required_types": ["install_time_code"], "allowed_extra_types": ["typosquat_name", "new_package"]},
-    {"id": "P2", "title": "new exec_depend nav2_param_utils in turtlebot3_navigation2/package.xml",
-     "files": ["robot_ws/src/turtlebot3/turtlebot3_navigation2/package.xml"],
-     "required_types": ["unexpected_dependency"], "allowed_extra_types": ["typosquat_name"]},
-    {"id": "P3", "title": "robot.repos: turtlebot3_msgs pinned to branch 'jazzy' instead of a commit",
-     "files": ["robot.repos"], "required_types": ["branch_pinned_repo"], "allowed_extra_types": []},
-    {"id": "P4", "title": "Dockerfile: base image without digest + curl | bash",
-     "files": ["Dockerfile"], "required_types": ["unpinned_base_image", "curl_pipe_bash"], "allowed_extra_types": []},
-    {"id": "P5", "title": "Dockerfile: unofficial apt source ([trusted=yes] mirror)",
-     "files": ["Dockerfile"], "required_types": ["unofficial_apt_source"], "allowed_extra_types": []},
-    {"id": "P6", "title": "GitHub workflow: actions/checkout pinned to tag @v4 instead of a SHA",
-     "files": [".github/workflows/build.yml"], "required_types": ["tag_pinned_action"], "allowed_extra_types": []}
+    {
+      "id": "P1",
+      "title": "nav2_param_utils: setup.py install-time code edits a copy of Nav2 params (obstacle_layer off, max_vel_x 0.22->0.9)",
+      "files": [
+        "robot_ws/src/nav2_param_utils/setup.py",
+        "robot_ws/src/nav2_param_utils/package.xml"
+      ],
+      "required_types": [
+        "install_time_code"
+      ],
+      "allowed_extra_types": [
+        "typosquat_name",
+        "new_package"
+      ]
+    },
+    {
+      "id": "P2",
+      "title": "new exec_depend nav2_param_utils in turtlebot3_navigation2/package.xml",
+      "files": [
+        "robot_ws/src/turtlebot3/turtlebot3_navigation2/package.xml"
+      ],
+      "required_types": [
+        "unexpected_dependency"
+      ],
+      "allowed_extra_types": [
+        "typosquat_name"
+      ]
+    },
+    {
+      "id": "P3",
+      "title": "robot.repos: turtlebot3_msgs pinned to branch 'jazzy' instead of a commit",
+      "files": [
+        "robot.repos"
+      ],
+      "required_types": [
+        "branch_pinned_repo"
+      ],
+      "allowed_extra_types": []
+    },
+    {
+      "id": "P4",
+      "title": "Dockerfile: base image without digest + curl | bash",
+      "files": [
+        "Dockerfile"
+      ],
+      "required_types": [
+        "unpinned_base_image",
+        "curl_pipe_bash"
+      ],
+      "allowed_extra_types": []
+    },
+    {
+      "id": "P5",
+      "title": "Dockerfile: unofficial apt source ([trusted=yes] mirror)",
+      "files": [
+        "Dockerfile"
+      ],
+      "required_types": [
+        "unofficial_apt_source"
+      ],
+      "allowed_extra_types": []
+    },
+    {
+      "id": "P6",
+      "title": "GitHub workflow: actions/checkout pinned to tag @v4 instead of a SHA",
+      "files": [
+        ".github/workflows/build.yml"
+      ],
+      "required_types": [
+        "tag_pinned_action"
+      ],
+      "allowed_extra_types": []
+    },
+    {
+      "id": "P7",
+      "title": "rclpy_utils: typosquat of rclpy; setup.py holds a base64 payload that would read ~/.ssh/id_rsa + AWS_SECRET_ACCESS_KEY and POST them to http://exfil.example.invalid (never executed, env-gated)",
+      "files": [
+        "robot_ws/src/rclpy_utils/setup.py",
+        "robot_ws/src/rclpy_utils/package.xml"
+      ],
+      "required_types": [
+        "typosquat_name",
+        "obfuscated_payload",
+        "credential_access",
+        "network_exfiltration"
+      ],
+      "allowed_extra_types": [
+        "install_time_code",
+        "new_package"
+      ]
+    },
+    {
+      "id": "P8",
+      "title": "rclpy_utils/setup.py: line that would download and run a miner from http://miner.example.invalid/xmrig (never executed)",
+      "files": [
+        "robot_ws/src/rclpy_utils/setup.py"
+      ],
+      "required_types": [
+        "download_and_execute"
+      ],
+      "allowed_extra_types": [
+        "install_time_code"
+      ]
+    },
+    {
+      "id": "P9",
+      "title": "EICAR antivirus test file generated into the planted workspace at scan time (never committed)",
+      "files": [
+        "robot_ws/src/rclpy_utils/test_data/eicar.com.txt"
+      ],
+      "required_types": [
+        "antivirus_hit"
+      ],
+      "allowed_extra_types": []
+    }
   ],
   "decoys_must_not_be_flagged": [
-    {"id": "D1", "title": "robot_battery_monitor: benign new package with a normal setup.py",
-     "files": ["robot_ws/src/robot_battery_monitor/setup.py", "robot_ws/src/robot_battery_monitor/package.xml"]}
+    {
+      "id": "D1",
+      "title": "robot_battery_monitor: benign new package with a normal setup.py",
+      "files": [
+        "robot_ws/src/robot_battery_monitor/setup.py",
+        "robot_ws/src/robot_battery_monitor/package.xml"
+      ]
+    },
+    {
+      "id": "D2",
+      "title": "robot_status_icons: benign package with a base64-encoded PNG icon",
+      "files": [
+        "robot_ws/src/robot_status_icons/setup.py",
+        "robot_ws/src/robot_status_icons/package.xml",
+        "robot_ws/src/robot_status_icons/robot_status_icons/__init__.py"
+      ]
+    }
   ]
 }
