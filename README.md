@@ -31,8 +31,8 @@ unexpected new dependency · typosquat (edit distance <= 2 of a real package, or
 ## CVE prioritisation
 Exposure: runtime (reachable via exec/depend/export/apt-Depends edges) vs build/dev-only (`-dev`, headers, compilers, build/test-only paths) vs base image only. Reachability: C/C++ library in the `ldd` closure of binaries of the packages started by the TurtleBot3 launch files (resolved with `dpkg -S` inside the image), or Python modules imported by those nodes. Provenance: Ubuntu / ROS apt repo / PyPI / unknown. Plus severity and fix availability. Top 10 shows at most 3 CVEs per package.
 
-## Top 10 fix actions
-Runtime + reachable CVEs that have a fixed version are grouped by the package to upgrade (target = highest fixed version), ranked by total priority score, with the CVE IDs inside each action. CVEs without a fixed version are listed separately. **Recommendation only; fixing happens on Day 2 with human approval.**
+## Recommended actions (all reachable CVEs, 3 tiers)
+Every runtime + reachable CVE lands in exactly one tier: **1 Upgrade** (a fixed version exists; grouped by package, target = highest fixed version) · **2 Remove / isolate** (no fix; the library is linked only by the visualisation family rviz2 / rviz_* / nav2_rviz_plugins; if the runtime dependency graph shows robot packages that depend on them, the action is downgraded to **mitigate** and names them) · **3 Escalate / monitor** (no fix; needed by robot runtime packages). Each action lists expected risk reduction, compatibility impact, rollback (keep the previous image tag) and the CVE IDs. **Recommendations only; fixing happens on Day 2 with human approval.**
 
 ## What's risky table
 Sorted by Guardian priority, not raw Trivy severity: suspicious findings first, then runtime + reachable CVEs, then the rest by score. Columns: priority, exposure (runtime / build/dev-only / base image only), reachable (yes/no), raw Trivy severity. Click a row for verified evidence and the priority reasons. `linux-libc-dev` rows rank low ("build-only kernel headers").

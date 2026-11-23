@@ -44,12 +44,12 @@ while queue:
     for f in glob.glob(f"{SHARE}/{p}/launch/**/*.py", recursive=True):
         for m in pat.finditer(open(f, errors="replace").read()):
             queue.append((next(g for g in m.groups() if g), d + 1))
-targets = []
-for p in seen:
-    targets += [x for x in glob.glob(f"{LIB}/{p}/*") if os.path.isfile(x)]
-    targets += glob.glob(f"{LIB}/lib{p}*.so*")
-libs, pyimports, nexe = {}, {}, 0
-for t in sorted(set(targets)):
+tpkg = {}
+for p in sorted(seen):
+    for x in [x for x in glob.glob(f"{LIB}/{p}/*") if os.path.isfile(x)] + glob.glob(f"{LIB}/lib{p}*.so*"):
+        tpkg.setdefault(x, p)
+libs, pyimports, nexe, libpk = {}, {}, 0, {}
+for t in sorted(tpkg):
     try: head = open(t, "rb").read(4)
     except Exception: continue
     if head == b"\x7fELF":
@@ -57,6 +57,7 @@ for t in sorted(set(targets)):
         out = subprocess.run(["ldd", t], capture_output=True, text=True).stdout
         for m in re.finditer(r"=>\s*(/\S+)", out):
             libs.setdefault(os.path.realpath(m.group(1)), os.path.basename(t))
+            libpk.setdefault(os.path.realpath(m.group(1)), set()).add(tpkg[t])
     elif head[:2] == b"#!":
         try: tree = ast.parse(open(t, errors="replace").read())
         except Exception: continue
@@ -85,6 +86,8 @@ def owners(paths):
     return res
 linked = {k: sorted({libs[x] for x in v if x in libs})[:3] for k, v in owners(libs).items()}
 imported = {k: sorted({pyimports[x] for x in v if x in pyimports})[:3] for k, v in owners(pyimports).items()}
+_o = owners(libpk)
+linked_pkgs = {d: sorted({pk for path in ps for pk in libpk.get(path, ())}) for d, ps in _o.items()}
 own = {}   # ROS package -> {deb: example binary}; only the package's OWN executables (lib/<pkg>/*) and libraries (lib/lib<pkg>*.so*)
 allpaths = {}
 for p in sorted(os.listdir(SHARE)):
@@ -103,7 +106,7 @@ for deb, ps in o2.items():
     for path in ps:
         for (pkg, binary) in allpaths.get(path, ()):
             own.setdefault(pkg, {}).setdefault(deb, binary)
-print(json.dumps({"own_links": own, "launched_pkgs": sorted(seen), "n_binaries": nexe, "linked": linked, "imported": imported}))
+print(json.dumps({"linked_pkgs": linked_pkgs, "own_links": own, "launched_pkgs": sorted(seen), "n_binaries": nexe, "linked": linked, "imported": imported}))
 '''
 
 
@@ -287,11 +290,71 @@ def main():
                           "score_total": round(sum(c["score"] for c in un), 1), "used_by_count": len(ros_links_all.get(pkg, [])),
                           "statuses": sorted({c["status"] for c in un if c["status"]}), "cve_ids": [c["id"] for c in un]})
     nofix.sort(key=lambda a: (-a["score_total"], a["package"]))
+    # ---- recommended actions for ALL reachable CVEs (3 tiers; recommendation only)
+    img_id = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", IMAGE], capture_output=True, text=True).stdout.strip()
+    rollback = f"keep the current image ({IMAGE}, {img_id[:19] or 'current digest'}) tagged as the rollback target; build the change as a NEW tag and switch back by re-pointing the tag"
+    lp = reach["linked_pkgs"]
+    Cn = {n for n in G if n.startswith("ros:") and "rviz" in G.nodes[n]["name"]}
+    Cnames = {G.nodes[n]["name"] for n in Cn}
+    dependents = sorted({G.nodes[x]["name"] for n in Cn if n in RG for x in nx.ancestors(RG, n) if x.startswith("ros:")} - Cnames)
+    needed_by = [d for d in dependents if f"ros:{d}" in rt]
+    rviz_launch = sorted(str(f.relative_to(TARGET)) for f in (TARGET / "robot_ws" / "src").rglob("launch/*.py") if "rviz" in f.read_text(errors="replace"))
+
+    def linkers(deb):
+        return sorted(set(ros_links_all.get(deb, [])) | set(lp.get(deb, [])))
+    t2, t3 = [], []
+    for pkg, cs in groups.items():
+        un = [c for c in cs if not c["fixed"]]
+        if not un:
+            continue
+        L = linkers(pkg)
+        item = {"package": pkg, "installed": un[0]["installed"], "cve_count": len(un), "cve_ids": [c["id"] for c in un],
+                "worst": max((c["severity"] for c in un), key=lambda x: SEV.get(x, 0)), "status": ", ".join(sorted({c["status"] for c in un if c["status"]})) or "no fix listed",
+                "needed_by": L, "evidence": un[0]["reachability"]}
+        (t2 if L and all(x in Cnames for x in L) else t3).append(item)
+    tiers = []
+    for a in sorted(actions, key=lambda a: (-a["score_total"], a["package"])):
+        tiers.append({"tier": 1, "kind": "upgrade", "title": f"Upgrade {a['package']} {a['installed']} -> {a['upgrade_to']}",
+                      "cves_removed": a["cve_count"], "cve_ids": [c["id"] for c in a["cves"]], "packages_affected": a["used_by"],
+                      "compatibility": f"same Ubuntu release, patch-level update ({a['installed']} -> {a['upgrade_to']}); every ROS package that links {a['package']} "
+                                       f"({a['used_by_count']} directly) picks it up after an image rebuild; run a Nav2 smoke test",
+                      "rollback": rollback, "reasons": [f"fixed version {a['upgrade_to']} exists in the {a['provenance']}", f"worst severity {a['worst']}"]})
+    if t2:
+        mitigate = bool(needed_by)
+        ids = [i for it in t2 for i in it["cve_ids"]]
+        reasons = [f"{len(t2)} libraries ({', '.join(i['package'] for i in t2)}) are linked only by the visualisation packages ({', '.join(sorted({x for i in t2 for x in i['needed_by']}))}); none has a fixed version"]
+        if mitigate:
+            reasons.append(f"BUT runtime dependency graph shows robot packages that depend on the rviz family: {', '.join(needed_by)} - cannot simply remove")
+            reasons.append("TurtleBot3 launch files that start rviz: " + ", ".join(rviz_launch))
+        tiers.append({"tier": 2, "kind": "mitigate" if mitigate else "remove",
+                      "title": ("Mitigate: make rviz2 and rviz plugins optional on the robot runtime image (keep on the developer laptop)" if mitigate
+                                else "Remove rviz2 and rviz plugins from the robot runtime image (keep on the developer laptop)"),
+                      "cves_removed": len(ids), "cve_ids": ids, "items": t2,
+                      "packages_affected": needed_by if mitigate else sorted(Cnames),
+                      "compatibility": ("exec_depend chains from " + ", ".join(needed_by) + " pull the rviz family in; removing it needs a headless variant of those packages (drop the rviz exec_depend / launch files) - otherwise the image build or launch files break"
+                                        if mitigate else "no runtime package depends on the rviz family; only rviz launch files (laptop side) are affected"),
+                      "rollback": rollback, "reasons": reasons})
+    if t3:
+        ids = [i for it in t3 for i in it["cve_ids"]]
+        tiers.append({"tier": 3, "kind": "monitor", "title": "Escalate for security review / monitor for a fix",
+                      "cves_removed": 0, "cves_covered": len(ids), "cve_ids": ids, "items": t3,
+                      "packages_affected": sorted({x for it in t3 for x in it["needed_by"]}),
+                      "compatibility": "no change to the image (nothing to upgrade or remove without breaking runtime packages)",
+                      "rollback": "not applicable (no change); re-run the scan when a fix is published",
+                      "reasons": ["no fixed version is available (status 'affected')", "the library is linked by launched robot runtime packages that are needed"]})
+    n1 = sum(t["cves_removed"] for t in tiers if t["tier"] == 1)
+    n2 = sum(t["cves_removed"] for t in tiers if t["tier"] == 2)
+    n3 = sum(t.get("cves_covered", 0) for t in tiers if t["tier"] == 3)
+    mit = any(t["kind"] == "mitigate" for t in tiers)
+    summary = {"reachable": len([1 for c in cves if c["runtime"] and c["reachable"]]), "upgrade": n1,
+               "removable": 0 if mit else n2, "mitigate": n2 if mit else 0, "monitor": n3}
+    plan = {"summary": summary, "actions": tiers, "needed_by_rviz": needed_by, "rviz_launch_files": rviz_launch}
+    funnel["plan_summary"] = summary
     actions.sort(key=lambda a: (-a["score_total"], a["package"]))
     funnel["actions_total"] = len(actions)
     funnel["no_fix_cves"] = sum(1 for c in cves if c["runtime"] and c["reachable"] and not c["fixed"])
     (OUT / "cves.json").write_text(json.dumps(cves, indent=1))
-    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber, "ros_links_all": ros_links_all, "actions": actions[:10], "no_fix": nofix}, indent=1))
+    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber, "ros_links_all": ros_links_all, "actions": actions[:10], "no_fix": nofix, "plan": plan}, indent=1))
     print(f"funnel: {len(cves)} CVEs -> {n_tree} in robot's tree -> {n_rt} runtime -> {n_reach} reachable -> top 10")
     print(f"launch seeds: {len(seeds)} pkgs; launched (recursive, in image): {len(reach['launched_pkgs'])}; binaries ldd'd: {reach['n_binaries']}; "
           f"linked debs: {len(linked)}; python-imported debs: {len(imported)}")
@@ -300,7 +363,10 @@ def main():
     print(f"fix actions: {len(actions)} (showing 10); runtime+reachable CVEs without a fix: {funnel['no_fix_cves']}")
     for a in actions[:10]:
         print(f"  upgrade {a['package']} {a['installed']} -> {a['upgrade_to']}: fixes {a['cve_count']} reachable CVEs, used by {a['used_by_count']} ROS pkgs, score {a['score_total']}")
-    for n in nofix[:5]:
+    print("PLAN:", summary)
+    for t in tiers:
+        print(f"  tier {t['tier']} {t['kind']}: {t['title']} | CVEs {t.get('cves_removed') or t.get('cves_covered')} | affected: {t['packages_affected'][:8]}")
+    for n in nofix[:0]:
         print(f"  no fix: {n['package']} {n['installed']}: {n['cve_count']} CVEs {n['statuses']}")
     print(f"ROS packages with runtime CVEs in libs their own binaries link: {len(ros_amber)}")
     for k in ("ament_cmake", "geometry_msgs"):

@@ -186,31 +186,44 @@ with tab_chg:
 with tab_risk:
     if prio:
         fn = prio["funnel"]
-        st.subheader("Top 10 fix actions")
-        acts = prio.get("actions", [])
-        st.markdown(f"**{fn['total']:,} CVEs → {fn['in_robot_tree']:,} in the robot's tree → {fn['runtime']:,} runtime → "
-                    f"{fn['reachable']:,} reachable → {len(acts)} fix action(s)** (+ {fn.get('no_fix_cves', 0)} reachable CVEs with no fixed version)")
+        st.subheader("Recommended actions")
+        plan = prio.get("plan", {})
+        sm = plan.get("summary", {})
+        st.markdown(f"**{fn['total']:,} CVEs → {fn['in_robot_tree']:,} in the robot's tree → {fn['runtime']:,} runtime → {fn['reachable']:,} reachable**")
+        if sm:
+            st.markdown(f"### {sm['reachable']} reachable CVEs → {sm['upgrade']} fixable by upgrade, {sm['removable']} removable, "
+                        + (f"{sm['mitigate']} to mitigate (rviz dependency), " if sm.get("mitigate") else "")
+                        + f"{sm['monitor']} to monitor")
         fc = st.columns(5)
-        for col, (lab, k) in zip(fc, [("All CVEs", "total"), ("In robot's tree", "in_robot_tree"), ("Runtime", "runtime"), ("Reachable", "reachable"), ("Fix actions", "actions_total")]):
+        for col, (lab, k) in zip(fc, [("All CVEs", "total"), ("In robot's tree", "in_robot_tree"), ("Runtime", "runtime"), ("Reachable", "reachable")]):
             col.metric(lab, f"{fn.get(k, 0):,}")
+        fc[4].metric("Actions", len(plan.get("actions", [])))
         st.caption("In tree = a TurtleBot3 dependency path reaches the package · runtime = not build/dev-only · reachable = linked (ldd) by "
                    f"binaries of the {len(fn['launched_packages'])} packages started by the TurtleBot3 launch files ({fn['binaries_scanned']} binaries scanned) or imported by Python nodes. "
-                   "Actions group the runtime + reachable CVEs that have a fixed version by the package to upgrade, ranked by total priority score. "
-                   "**This is a recommendation only — fixing happens on Day 2 with human approval.**")
-        for i, t in enumerate(acts, 1):
-            with st.expander(f"{i}. Upgrade {t['package']} {t['installed']} → {t['upgrade_to']} · fixes {t['cve_count']} reachable CVEs · "
-                             f"directly linked by {t['used_by_count']} ROS packages · total priority {t['score_total']}"):
-                st.markdown(f"Worst severity: **{t['worst']}** · provenance: {t['provenance']} · reachability: {t['reachability']}"
-                            + (f" · {t['unfixed_cve_count']} more reachable CVEs in this package have no fix yet" if t["unfixed_cve_count"] else ""))
-                st.markdown("CVEs fixed: " + ", ".join(f"`{c['id']}` ({c['severity'].lower()}, score {c['score']})" for c in t["cves"]))
-                if t["used_by"]:
-                    st.markdown("Used by: " + ", ".join(f"`{u}`" for u in t["used_by"][:25]) + (" …" if len(t["used_by"]) > 25 else ""))
-        nf = prio.get("no_fix", [])
-        if nf:
-            with st.expander(f"No fix available yet: {sum(n['cve_count'] for n in nf)} reachable CVEs in {len(nf)} packages (monitor / mitigate, nothing to upgrade to)"):
-                for n in nf:
-                    st.markdown(f"- `{n['package']}` {n['installed']} — {n['cve_count']} CVEs (worst {n['worst']}, status {', '.join(n['statuses']) or '?'}), "
-                                f"directly linked by {n['used_by_count']} ROS packages: " + ", ".join(f"`{x}`" for x in n["cve_ids"]))
+                   "Every reachable CVE is in exactly one tier: 1 upgrade (fix exists) · 2 remove/isolate (no fix, library only needed by non-runtime components; downgraded to "
+                   "mitigate if the runtime dependency graph shows a robot package needs it) · 3 escalate/monitor (no fix, needed at runtime). "
+                   "**These are recommendations only — fixing happens on Day 2 with human approval.**")
+        TIER = {1: "Tier 1 — Upgrade", 2: "Tier 2 — Remove / isolate", 3: "Tier 3 — Monitor / escalate"}
+        for t in plan.get("actions", []):
+            n = t["cves_removed"] or t.get("cves_covered", 0)
+            icon = {"upgrade": "⬆️", "remove": "🗑️", "mitigate": "🛡️", "monitor": "👁️"}[t["kind"]]
+            label = f"{icon} {TIER[t['tier']]}{' (downgraded to mitigate)' if t['kind'] == 'mitigate' else ''}: {t['title']} · {n} reachable CVEs"
+            with st.expander(label, expanded=t["tier"] == 1):
+                st.markdown(f"**Expected risk reduction:** " + (f"{t['cves_removed']} reachable CVEs removed" if t["cves_removed"] and t["kind"] != "mitigate" else
+                            (f"up to {t['cves_removed']} reachable CVEs removed once the rviz family can be dropped from the robot image" if t["kind"] == "mitigate" else
+                             f"none — {t.get('cves_covered', 0)} reachable CVEs stay open and are tracked")))
+                st.markdown("**Compatibility impact:** " + t["compatibility"])
+                if t["packages_affected"]:
+                    st.markdown(("**Robot packages affected / needing it:** " if t["tier"] != 1 else "**Robot packages that link it directly:** ")
+                                + ", ".join(f"`{x}`" for x in t["packages_affected"][:30]) + (" …" if len(t["packages_affected"]) > 30 else ""))
+                st.markdown("**Rollback:** " + t["rollback"])
+                st.markdown("**Why:** " + " · ".join(t["reasons"]))
+                if t.get("items"):
+                    rows_ = [{"library": i["package"], "installed": i["installed"], "CVEs": i["cve_count"], "worst": i["worst"], "status": i["status"],
+                              "needed by (robot packages)": ", ".join(i["needed_by"][:8]) + (" …" if len(i["needed_by"]) > 8 else "") or "—",
+                              "evidence": i["evidence"]} for i in t["items"]]
+                    st.dataframe(pd.DataFrame(rows_), width='stretch', hide_index=True)
+                st.markdown("CVE IDs: " + ", ".join(f"`{i}`" for i in t["cve_ids"]))
         st.divider()
         st.subheader("All risks")
     rows = []
