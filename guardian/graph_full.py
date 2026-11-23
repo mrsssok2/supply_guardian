@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone full-screen dependency graph -> out/graph_full.html (also copied to dashboard/static/).
+"""Standalone full-screen dependency graph -> out/graph_full.html (served by run.sh on 127.0.0.1:8502).
 
 Precomputed layout (no live physics): hierarchical left-to-right by dependency depth from the TurtleBot3
 workspace packages. Self-contained: vis-network is inlined from guardian/vendor, so it works offline.
@@ -163,9 +163,6 @@ def main():
     lib = (ROOT / "guardian" / "vendor" / "vis-network.min.js").read_text()
     html = HTML.replace("/*VIS_JS*/", lib.replace("</script", "<\\/script")).replace("__DATA__", payload)
     (OUT / "graph_full.html").write_text(html)
-    static = ROOT / "dashboard" / "static"
-    static.mkdir(exist_ok=True)
-    shutil.copy(OUT / "graph_full.html", static / "graph_full.html")
     print(f"graph_full.html: {len(small)} nodes default / {len(keep)} with apt+pip, {len(edges)} edges, {len(html) // 1024} KB, {len(planted)} planted, "
           f"{sum(n['amber'] for n in nodes)} amber")
 

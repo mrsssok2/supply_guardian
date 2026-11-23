@@ -10,4 +10,10 @@ $PY guardian/prioritize.py
 $PY guardian/suspicious.py main planted
 [ -f guardian/agent.py ] && $PY guardian/agent.py || true
 $PY guardian/graph_full.py
-exec $PY -m streamlit run dashboard/app.py --server.headless true --server.address 127.0.0.1 --server.port 8501
+# serve out/ (graph_full.html) on 127.0.0.1:8502 for the dashboard link; both servers are stopped when run.sh stops
+python3 -m http.server 8502 --bind 127.0.0.1 --directory out > /dev/null 2>&1 &
+HTTP_PID=$!
+$PY -m streamlit run dashboard/app.py --server.headless true --server.address 127.0.0.1 --server.port 8501 &
+ST_PID=$!
+trap 'kill $HTTP_PID $ST_PID 2>/dev/null' EXIT INT TERM
+wait $ST_PID

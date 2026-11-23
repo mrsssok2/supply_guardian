@@ -362,6 +362,8 @@ def main():
         t["cve_also_in_other_action"] = sorted(set(libs) - set(ids))
         claimed |= set(ids)
         t["cves_covered" if t["tier"] == 3 else "cves_removed"] = len(ids)
+    for t in tiers:  # every action (upgrade / mitigate-remove / monitor) must carry cve_libs for the dashboard
+        t.setdefault("cve_libs", {i: [] for i in t.get("cve_ids", [])})
     n1 = sum(t["cves_removed"] for t in tiers if t["tier"] == 1)
     n2 = sum(t["cves_removed"] for t in tiers if t["tier"] == 2)
     n3 = sum(t.get("cves_covered", 0) for t in tiers if t["tier"] == 3)

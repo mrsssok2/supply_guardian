@@ -13,9 +13,14 @@ st.set_page_config(page_title="Supply Chain Guardian", layout="wide")
 
 
 @st.cache_data
+def _load(name, mtime, default):
+    return json.loads((OUT / name).read_text()) if mtime else default
+
+
 def load(name, default):
+    """Cached per file *modification time*, so re-running the pipeline never serves stale data."""
     p = OUT / name
-    return json.loads(p.read_text()) if p.exists() else default
+    return _load(name, p.stat().st_mtime_ns if p.exists() else 0, default)
 
 
 components_ = load("components.json", [])
@@ -82,10 +87,11 @@ with tab_in:
     st.caption("Every component found in the image, workspace, robot.repos, Dockerfile and CI, with the shortest dependency path from a TurtleBot3 package.")
     gf = OUT / "graph_full.html"
     if gf.exists():
-        st.markdown('<a href="app/static/graph_full.html" target="_blank" style="display:inline-block;padding:8px 14px;background:#238636;color:#fff;'
+        st.markdown('<a href="http://127.0.0.1:8502/graph_full.html" target="_blank" style="display:inline-block;padding:8px 14px;background:#238636;color:#fff;'
                     'border-radius:6px;text-decoration:none;font-weight:600">Open full-screen graph ↗</a>', unsafe_allow_html=True)
-        st.caption("Standalone page (works offline): precomputed left-to-right layout by dependency depth, all ROS packages by default, toggle for apt/pip, search, click a node for its path and details. "
-                   "From WSL you can also open the file directly: `explorer.exe $(wslpath -w out/graph_full.html)`")
+        st.caption("Standalone page (works offline), served by run.sh on http://127.0.0.1:8502 (a plain `python3 -m http.server` on out/): precomputed left-to-right layout by dependency depth, "
+                   "all ROS packages by default, toggle for apt/pip, search, click a node for its path and details. "
+                   "Without run.sh, open the file directly from WSL: `explorer.exe $(wslpath -w out/graph_full.html)`")
         st.download_button("Download graph_full.html", gf.read_bytes(), file_name="graph_full.html", mime="text/html")
     st.subheader("TurtleBot3 top-level packages and their direct dependencies")
     try:
@@ -231,9 +237,10 @@ with tab_risk:
                               "needed by (robot packages)": ", ".join(i["needed_by"][:8]) + (" …" if len(i["needed_by"]) > 8 else "") or "—",
                               "evidence": i["evidence"]} for i in t["items"]]
                     st.dataframe(pd.DataFrame(rows_), width='stretch', hide_index=True)
-                st.markdown(f"CVE IDs ({len(t['cve_ids'])} unique; ×N = number of libraries the CVE affects): "
-                            + ", ".join(f"`{i}`" + (f" ×{len(t['cve_libs'][i])} ({', '.join(t['cve_libs'][i])})" if len(t["cve_libs"][i]) > 1 else "")
-                            for i in t["cve_ids"]))
+                libs_of = t.get("cve_libs", {})
+                st.markdown(f"CVE IDs ({len(t.get('cve_ids', []))} unique; ×N = number of libraries the CVE affects): "
+                            + ", ".join(f"`{i}`" + (f" ×{len(libs_of.get(i, []))} ({', '.join(libs_of.get(i, []))})" if len(libs_of.get(i, [])) > 1 else "")
+                            for i in t.get("cve_ids", [])))
         MAL = ("obfuscated_payload", "credential_access", "network_exfiltration", "download_and_execute", "antivirus_hit")
         mal = [f for f in findings if f["type"] in MAL]
         st.divider()
