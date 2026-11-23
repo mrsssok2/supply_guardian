@@ -80,6 +80,13 @@ with tab_in:
                  width='stretch', height=360, hide_index=True)
 
     st.caption("Every component found in the image, workspace, robot.repos, Dockerfile and CI, with the shortest dependency path from a TurtleBot3 package.")
+    gf = OUT / "graph_full.html"
+    if gf.exists():
+        st.markdown('<a href="app/static/graph_full.html" target="_blank" style="display:inline-block;padding:8px 14px;background:#238636;color:#fff;'
+                    'border-radius:6px;text-decoration:none;font-weight:600">Open full-screen graph ↗</a>', unsafe_allow_html=True)
+        st.caption("Standalone page (works offline): precomputed left-to-right layout by dependency depth, all ROS packages by default, toggle for apt/pip, search, click a node for its path and details. "
+                   "From WSL you can also open the file directly: `explorer.exe $(wslpath -w out/graph_full.html)`")
+        st.download_button("Download graph_full.html", gf.read_bytes(), file_name="graph_full.html", mime="text/html")
     st.subheader("TurtleBot3 top-level packages and their direct dependencies")
     try:
         from pyvis.network import Network
