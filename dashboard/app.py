@@ -24,6 +24,7 @@ findings = load("findings.json", [])
 changes = load("changes.json", [])
 score = load("score.json", {})
 agent = load("agent.json", {})
+prio = load("priority.json", {})
 graph = load("graph.json", {})
 RISK_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 ICON = {"critical": "🟥", "high": "🟧", "medium": "🟨", "low": "🟦"}
@@ -59,6 +60,9 @@ with tab_in:
         st.subheader("Direct vs transitive")
         rel = pd.crosstab(df["layer"], df["relation"])
         st.dataframe(rel, width='stretch')
+        st.caption("Rows = layers, columns = how a component relates to the TurtleBot3 packages.")
+    st.caption("**Relations:** *workspace root* = a TurtleBot3 package itself · *direct* = depended on directly by a TurtleBot3 package · "
+               "*transitive* = reached through other dependencies · *base image only* = in the image but no TurtleBot3 dependency path leads to it.")
     st.subheader("Component search")
     q1, q2, q3 = st.columns([3, 1, 1])
     text = q1.text_input("Search name / path", "")
@@ -75,6 +79,7 @@ with tab_in:
     st.dataframe(v[["name", "version", "layer", "relation", "distance", "cve_count", "path"]],
                  width='stretch', height=360, hide_index=True)
 
+    st.caption("Every component found in the image, workspace, robot.repos, Dockerfile and CI, with the shortest dependency path from a TurtleBot3 package.")
     st.subheader("TurtleBot3 top-level packages and their direct dependencies")
     try:
         from pyvis.network import Network
@@ -105,36 +110,67 @@ with tab_chg:
     if not changes:
         st.info("No changes.json - run guardian/suspicious.py")
     else:
-        flagged = {(f["file"], f["line"]): f for f in findings}
-        cd = pd.DataFrame(changes)
-        cd["flagged"] = cd.apply(lambda r: flagged[(r["file"], r["line"])]["type"] if (r["file"], r["line"]) in flagged else "", axis=1)
         fmt = lambda x: x.strip() if isinstance(x, str) else "∅"
-        cd["old → new"] = cd.apply(lambda r: f"{fmt(r['old'])}  →  {fmt(r['new'])}", axis=1)
+        owner = {}
+        for f in findings:
+            owner.setdefault((f["file"], f["line"]), f)
+            for h in f.get("hits") or []:
+                owner.setdefault((f["file"], h[0]), f)
+        rows = []
+        for c in changes:
+            f = owner.get((c["file"], c["line"]))
+            rows.append({"finding": f["id"] if f else "", "type": f["type"] if f else "", "risk": f["risk"] if f else "",
+                         "file": c["file"], "line": c["line"], "status": c["status"],
+                         "old → new": f"{fmt(c['old'])}  →  {fmt(c['new'])}", "_r": RISK_RANK[f["risk"]] if f else 9})
+        cd = pd.DataFrame(rows).sort_values(["_r", "finding", "file", "line"])
+        only = st.checkbox("Only flagged lines (those that triggered a finding)", True)
         files = sorted(cd["file"].unique())
         sel = st.multiselect("File", files)
-        only = st.checkbox("Only flagged lines", False)
         v = cd[cd["file"].isin(sel)] if sel else cd
         if only:
-            v = v[v["flagged"] != ""]
-        st.caption(f"{len(changes)} changed lines in {len(files)} files · {len(v)} shown")
-        st.dataframe(v[["file", "line", "status", "old → new", "flagged"]], width='stretch',
-                     hide_index=True, height=520)
+            v = v[v["finding"] != ""]
+        v = v.assign(risk=v["risk"].map(lambda r: f"{ICON.get(r, '')} {r}" if r else ""))
+        st.caption(f"{len(changes)} changed lines in {len(files)} files · {len(v)} shown · grouped by finding, most severe first")
+        st.dataframe(v[["finding", "type", "risk", "file", "line", "status", "old → new"]], width='stretch',
+                     hide_index=True, height=480)
+        st.caption("Line-level diff of branch `planted` against `main`; lines that triggered a finding are listed first with the finding id, type and risk.")
 
 # ------------------------------------------------------------------ risky
 with tab_risk:
+    if prio:
+        fn = prio["funnel"]
+        st.subheader("Top 10 CVEs that matter")
+        st.markdown(f"**{fn['total']:,} CVEs → {fn['in_robot_tree']:,} in the robot's tree → {fn['runtime']:,} runtime → "
+                    f"{fn['reachable']:,} reachable → top 10**")
+        fc = st.columns(5)
+        for col, (lab, k) in zip(fc, [("All CVEs", "total"), ("In robot's tree", "in_robot_tree"), ("Runtime", "runtime"), ("Reachable", "reachable"), ("Shown", "top")]):
+            col.metric(lab, f"{fn[k]:,}")
+        st.caption("In tree = a TurtleBot3 dependency path reaches the package · runtime = not build/dev-only · reachable = linked (ldd) by "
+                   f"binaries of the {len(fn['launched_packages'])} packages started by the TurtleBot3 launch files ({fn['binaries_scanned']} binaries scanned) or imported by Python nodes. "
+                   "Max 3 CVEs per package.")
+        for i, t in enumerate(prio["top10"], 1):
+            with st.expander(f"{i}. {t['id']} · {t['severity']} · {t['package']} {t['installed']} · priority {t['score']}"):
+                st.markdown("**Why it ranks here:** " + " · ".join(t["priority_reasons"]))
+                st.markdown(f"Exposure: **{t['exposure']}** · Reachability: {t['reachability']} · Provenance: {t['provenance']}")
+                if t["path"]:
+                    st.markdown("Path: " + " → ".join(f"`{p}`" for p in t["path"]))
+        st.divider()
+        st.subheader("All risks")
     rows = []
     for f in findings:
         rows.append({"kind": "suspicious", "id": f["id"], "risk": f["risk"], "layer": f["layer"],
-                     "component": f["component"], "summary": f"{f['type']}: {f['reason']}", "ref": ("f", f["id"])})
+                     "component": f["component"], "summary": f"{f['type']}: {f['reason']}", "priority": 100.0 - RISK_RANK[f["risk"]], "ref": ("f", f["id"])})
     for i, c in enumerate(cves):
         rows.append({"kind": "CVE", "id": c["id"], "risk": c["severity"].lower(), "layer": c["layer"],
                      "component": f"{c['package']} {c['installed']}",
-                     "summary": f"fixed in {c['fixed']}" if c["fixed"] else "no fix available" ,
-                     "ref": ("c", i)})
+                     "summary": f"{c.get('exposure', '?')} · fixed in {c['fixed']}" if c["fixed"] else f"{c.get('exposure', '?')} · no fix available",
+                     "priority": c.get("score", 0.0), "ref": ("c", i)})
     rk = pd.DataFrame(rows)
     rk["rank"] = rk["risk"].map(lambda r: RISK_RANK.get(r, 9))
     rk["_k"] = (rk["kind"] != "suspicious").astype(int)
-    rk = rk.sort_values(["rank", "_k"]).reset_index(drop=True)
+    sort_by = st.radio("Sort by", ["Priority score (findings first, then CVEs by score)", "Severity"], horizontal=True)
+    rk = (rk.sort_values(["priority", "rank"], ascending=[False, True]) if sort_by.startswith("Priority")
+          else rk.sort_values(["rank", "_k", "priority"], ascending=[True, True, False])).reset_index(drop=True)
     f1, f2, f3 = st.columns([2, 2, 3])
     lay = f1.multiselect("Layer", sorted(rk["layer"].unique()))
     rsk = f2.multiselect("Risk", ["critical", "high", "medium", "low"], default=["critical", "high"])
@@ -149,7 +185,8 @@ with tab_risk:
         v = v[m]
     v = v.reset_index(drop=True)
     st.caption(f"{len(v)} rows ({(v['kind']=='suspicious').sum()} suspicious findings, {(v['kind']=='CVE').sum()} CVEs) — click a row for evidence")
-    show = v.assign(risk=v["risk"].map(lambda r: f"{ICON.get(r, '')} {r}"))[["risk", "kind", "id", "layer", "component", "summary"]]
+    show = v.assign(risk=v["risk"].map(lambda r: f"{ICON.get(r, '')} {r}"))[["risk", "priority", "kind", "id", "layer", "component", "summary"]]
+    st.caption("CVEs from Trivy and suspicious changes from the diff in one list; priority = severity × exposure × reachability × provenance × fix (findings are always above CVEs). Click a row for its evidence.")
     ev = st.dataframe(show, width='stretch', hide_index=True, height=380,
                       on_select="rerun", selection_mode="single-row")
     sel = ev.selection.rows if ev and ev.selection else []
@@ -174,6 +211,9 @@ with tab_risk:
                 c = cves[key]
                 st.markdown(f"**{c['id']}** · {c['severity']} · `{c['package']}` {c['installed']} (layer: {c['layer']})")
                 st.write(f"Fixed version: {c['fixed'] or 'none listed'} · status: {c['status']}")
+                if "score" in c:
+                    st.markdown(f"Priority score **{c['score']}** · exposure **{c['exposure']}** · reachability: {c['reachability']} · provenance: {c['provenance']}")
+                    st.markdown("Score reasons: " + " · ".join(c["priority_reasons"]))
                 if c.get("title"):
                     st.write(c["title"])
                 st.markdown("Path from TurtleBot3: " + (" → ".join(f"`{p}`" for p in c["path"]) if c["path"] else "_not reachable in the graph_"))
@@ -187,7 +227,15 @@ with tab_risk:
             if kind == "f" and key in agent:
                 a = agent[key]
                 st.info(a["verdict_text"])
-                st.caption(f"source: {a['source']} · verdict: {a['verdict']}")
+                st.caption(f"source: {a['source']} · verdict: {a['verdict']} · confidence: {a.get('confidence', '?')}"
+                           + (f" · note: {a['note']}" if a.get("note") else ""))
+                if a.get("tool_calls"):
+                    with st.expander(f"Investigator tool calls ({len(a['tool_calls'])})", expanded=True):
+                        for i, tc in enumerate(a["tool_calls"], 1):
+                            st.markdown(f"**{i}. `{tc['tool']}`** `{json.dumps(tc['args'])}`")
+                            st.code(tc["result"], language="text")
+                else:
+                    st.caption("No tool calls were made by the model for this finding.")
             elif kind == "f":
                 st.warning("No AI verdict for this finding (only critical/high are analysed; run guardian/agent.py).")
             else:

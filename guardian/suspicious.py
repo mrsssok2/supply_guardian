@@ -145,6 +145,34 @@ def analyse_setup_py(src):
     return hits, hooked
 
 
+OFFICIAL_PREFIXES = ("nav2_", "ros_", "rclpy", "turtlebot3_")
+
+
+def edit_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def typosquat_reason(name, official):
+    """None, or why `name` (not an official package) looks like a typosquat: edit distance <= 2 of a real
+    package name, or an official prefix (nav2_, ros_, rclpy, turtlebot3_) without being in the official list."""
+    if name in official:
+        return None
+    near = sorted((edit_distance(name, o), o) for o in official if abs(len(o) - len(name)) <= 2)[:3]
+    if near and near[0][0] <= 2:
+        return (f"'{name}' is not an official package but is within edit distance {near[0][0]} of real package "
+                f"'{near[0][1]}'")
+    for pre in OFFICIAL_PREFIXES:
+        if name.startswith(pre):
+            return f"'{name}' uses the official prefix '{pre}' but is not in the official package list (image ROS packages + workspace on main)"
+    return None
+
+
 # ------------------------------------------------------------------ detection
 def detect(changes):
     ros_names, other_names = known_names()
@@ -187,16 +215,10 @@ def detect(changes):
                 add("install_time_code", name, "source", sp, hits[0][0], None, f"{len(hits)} risky operation(s): {', '.join(kinds)}",
                     ev, risk, "new package runs file-writing/subprocess/network/eval code when installed", hits=[list(h) for h in hits], hooked=hooked)
         # typosquat-like name
-        if name not in ros_names:
-            cands = difflib.get_close_matches(name, sorted(ros_names), n=3, cutoff=0.0)
-            scored = sorted(((difflib.SequenceMatcher(None, name, c).ratio(), c) for c in ros_names), reverse=True)[:3]
-            prefix = name.split("_")[0] + "_"
-            family = sum(1 for r in ros_names if r.startswith(prefix))
-            if scored and scored[0][0] >= 0.7 and family >= 10:
-                add("typosquat_name", name, "source", pf, 1, None, name,
-                    f"'{name}' is not a real ROS package but resembles {', '.join(f'{c} ({r:.2f})' for r, c in scored)}; "
-                    f"namespace prefix '{prefix}' is used by {family} real packages",
-                    "high", "name imitates the official Nav2 package family but does not exist in the image/graph")
+        why = typosquat_reason(name, ros_names)
+        if why:
+            add("typosquat_name", name, "source", pf, 1, None, name, why, "high",
+                "name imitates a real/official ROS package name but is not one in the image or workspace")
 
     # ---- changes in package.xml of existing packages: new dependency
     dep_re = re.compile(r"<(depend|build_depend|exec_depend|test_depend|build_export_depend|buildtool_depend)>\s*([^<\s]+)\s*</")
@@ -217,6 +239,10 @@ def detect(changes):
             if dep in risky_new:
                 risk = "critical"
                 extra = f"; '{dep}' contains install-time code ({risky_new[dep]})"
+            why = typosquat_reason(dep, ros_names) if dep not in new_pkgs else None
+            if why:
+                add("typosquat_name", dep, "ros", f, c["line"], c["old"], c["new"].strip(), why, "high",
+                    "dependency name imitates a real/official ROS package name but is not one")
             add("unexpected_dependency", dep, "ros", f, c["line"], c["old"], c["new"].strip(),
                 f"{f}:{c['line']} adds <{m.group(1)}>{dep}</...> to {owner}; '{dep}' is not in the upstream ROS install, "
                 f"apt or pip inventory{extra}. Dependency path: {path}",

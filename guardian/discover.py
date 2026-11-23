@@ -15,7 +15,7 @@ TARGET = Path(os.environ.get("TARGET_DIR", ROOT / "target"))
 OUT = ROOT / "out"
 IMAGE = os.environ.get("ROBOT_IMAGE", "gurdy2/ros:jazzy")
 TRIVY = shutil.which("trivy") or str(Path.home() / ".local/bin/trivy")
-DEP_TAGS = ("depend", "build_depend", "exec_depend", "build_export_depend",
+DEP_TAGS = ("depend", "build_depend", "test_depend", "exec_depend", "build_export_depend",
             "buildtool_depend", "buildtool_export_depend", "run_depend")
 SEV_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
 
@@ -221,8 +221,8 @@ def analyse(G, vulns, ws):
             cves[nid].append(v)
     cve_list = []
     for nid, d in G.nodes(data=True):
-        rel = "root" if dist.get(nid) == 0 else "direct" if dist.get(nid) == 1 else \
-              "transitive" if nid in dist else "not-reachable"
+        rel = "workspace root" if dist.get(nid) == 0 else "direct" if dist.get(nid) == 1 else \
+              "transitive" if nid in dist else "base image only"
         path = [G.nodes[x]["name"] for x in path_to(nid)] if nid in dist else []
         comps.append({"id": nid, "name": d["name"], "version": d.get("version", ""), "layer": d["layer"],
                       "kind": d.get("kind"), "relation": rel, "distance": dist.get(nid),
