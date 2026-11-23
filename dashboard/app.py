@@ -189,9 +189,10 @@ with tab_risk:
         st.subheader("Recommended actions")
         plan = prio.get("plan", {})
         sm = plan.get("summary", {})
-        st.markdown(f"**{fn['total']:,} CVEs → {fn['in_robot_tree']:,} in the robot's tree → {fn['runtime']:,} runtime → {fn['reachable']:,} reachable**")
+        st.markdown(f"**{fn['total']:,} unique CVEs → {fn['in_robot_tree']:,} in the robot's tree → {fn['runtime']:,} runtime → {fn['reachable']:,} reachable**"
+                    + (f"  \n(CVE × library pairs: {fn['pairs']['total']:,} → {fn['pairs']['in_robot_tree']:,} → {fn['pairs']['runtime']:,} → {fn['pairs']['reachable']:,})" if fn.get("pairs") else ""))
         if sm:
-            st.markdown(f"### {sm['reachable']} reachable CVEs → {sm['upgrade']} fixable by upgrade, {sm['removable']} removable, "
+            st.markdown(f"### {sm['reachable']} unique reachable CVEs → {sm['upgrade']} fixable by upgrade, {sm['removable']} removable, "
                         + (f"{sm['mitigate']} to mitigate (rviz dependency), " if sm.get("mitigate") else "")
                         + f"{sm['monitor']} to monitor")
         fc = st.columns(5)
@@ -200,7 +201,7 @@ with tab_risk:
         fc[4].metric("Actions", len(plan.get("actions", [])))
         st.caption("In tree = a TurtleBot3 dependency path reaches the package · runtime = not build/dev-only · reachable = linked (ldd) by "
                    f"binaries of the {len(fn['launched_packages'])} packages started by the TurtleBot3 launch files ({fn['binaries_scanned']} binaries scanned) or imported by Python nodes. "
-                   "Every reachable CVE is in exactly one tier: 1 upgrade (fix exists) · 2 remove/isolate (no fix, library only needed by non-runtime components; downgraded to "
+                   "CVE counts are unique CVE IDs (one CVE can affect several libraries). Every reachable CVE is in exactly one tier: 1 upgrade (fix exists) · 2 remove/isolate (no fix, library only needed by non-runtime components; downgraded to "
                    "mitigate if the runtime dependency graph shows a robot package needs it) · 3 escalate/monitor (no fix, needed at runtime). "
                    "**These are recommendations only — fixing happens on Day 2 with human approval.**")
         TIER = {1: "Tier 1 — Upgrade", 2: "Tier 2 — Remove / isolate", 3: "Tier 3 — Monitor / escalate"}
@@ -209,7 +210,7 @@ with tab_risk:
             icon = {"upgrade": "⬆️", "remove": "🗑️", "mitigate": "🛡️", "monitor": "👁️"}[t["kind"]]
             label = f"{icon} {TIER[t['tier']]}{' (downgraded to mitigate)' if t['kind'] == 'mitigate' else ''}: {t['title']} · {n} reachable CVEs"
             with st.expander(label, expanded=t["tier"] == 1):
-                st.markdown(f"**Expected risk reduction:** " + (f"{t['cves_removed']} reachable CVEs removed" if t["cves_removed"] and t["kind"] != "mitigate" else
+                st.markdown(f"**Expected risk reduction:** " + (f"{t['cves_removed']} unique reachable CVEs removed" if t["cves_removed"] and t["kind"] != "mitigate" else
                             (f"up to {t['cves_removed']} reachable CVEs removed once the rviz family can be dropped from the robot image" if t["kind"] == "mitigate" else
                              f"none — {t.get('cves_covered', 0)} reachable CVEs stay open and are tracked")))
                 st.markdown("**Compatibility impact:** " + t["compatibility"])
@@ -219,11 +220,13 @@ with tab_risk:
                 st.markdown("**Rollback:** " + t["rollback"])
                 st.markdown("**Why:** " + " · ".join(t["reasons"]))
                 if t.get("items"):
-                    rows_ = [{"library": i["package"], "installed": i["installed"], "CVEs": i["cve_count"], "worst": i["worst"], "status": i["status"],
+                    rows_ = [{"library": i["package"], "installed": i["installed"], "CVE-library pairs": i["cve_count"], "worst": i["worst"], "status": i["status"],
                               "needed by (robot packages)": ", ".join(i["needed_by"][:8]) + (" …" if len(i["needed_by"]) > 8 else "") or "—",
                               "evidence": i["evidence"]} for i in t["items"]]
                     st.dataframe(pd.DataFrame(rows_), width='stretch', hide_index=True)
-                st.markdown("CVE IDs: " + ", ".join(f"`{i}`" for i in t["cve_ids"]))
+                st.markdown(f"CVE IDs ({len(t['cve_ids'])} unique; ×N = number of libraries the CVE affects): "
+                            + ", ".join(f"`{i}`" + (f" ×{len(t['cve_libs'][i])} ({', '.join(t['cve_libs'][i])})" if len(t["cve_libs"][i]) > 1 else "")
+                            for i in t["cve_ids"]))
         MAL = ("obfuscated_payload", "credential_access", "network_exfiltration", "download_and_execute", "antivirus_hit")
         mal = [f for f in findings if f["type"] in MAL]
         st.divider()

@@ -224,11 +224,15 @@ def main():
                  score=round(score, 1), priority_reasons=reasons,
                  in_tree=nid in full, runtime=expo == "runtime", reachable=bool(evid) and expo != "base image only")
 
-    n_tree = sum(c["in_tree"] for c in cves)
-    n_rt = sum(c["runtime"] for c in cves)
-    n_reach = sum(c["runtime"] and c["reachable"] for c in cves)
+    def uniq(pred):  # unique CVE IDs (one CVE can affect several libraries, e.g. the 4 krb5 libraries)
+        return len({c["id"] for c in cves if pred(c)})
+    n_tree = uniq(lambda c: c["in_tree"])
+    n_rt = uniq(lambda c: c["runtime"])
+    n_reach = uniq(lambda c: c["runtime"] and c["reachable"])
+    pairs = {"total": len(cves), "in_robot_tree": sum(c["in_tree"] for c in cves), "runtime": sum(c["runtime"] for c in cves),
+             "reachable": sum(c["runtime"] and c["reachable"] for c in cves)}
     ranked = sorted(cves, key=lambda c: (-c["score"], c["id"]))
-    funnel = {"total": len(cves), "in_robot_tree": n_tree, "runtime": n_rt, "reachable": n_reach, "top": 10,
+    funnel = {"total": uniq(lambda c: True), "pairs": pairs, "in_robot_tree": n_tree, "runtime": n_rt, "reachable": n_reach, "top": 10,
               "launched_packages": reach["launched_pkgs"], "binaries_scanned": reach["n_binaries"],
               "launch_seeds": seeds}
     picked, per_pkg = [], collections.Counter()
@@ -315,7 +319,7 @@ def main():
     tiers = []
     for a in sorted(actions, key=lambda a: (-a["score_total"], a["package"])):
         tiers.append({"tier": 1, "kind": "upgrade", "title": f"Upgrade {a['package']} {a['installed']} -> {a['upgrade_to']}",
-                      "cves_removed": a["cve_count"], "cve_ids": [c["id"] for c in a["cves"]], "packages_affected": a["used_by"],
+                      "package": a["package"], "cves_removed": a["cve_count"], "cve_ids": [c["id"] for c in a["cves"]], "packages_affected": a["used_by"],
                       "compatibility": f"same Ubuntu release, patch-level update ({a['installed']} -> {a['upgrade_to']}); every ROS package that links {a['package']} "
                                        f"({a['used_by_count']} directly) picks it up after an image rebuild; run a Nav2 smoke test",
                       "rollback": rollback, "reasons": [f"fixed version {a['upgrade_to']} exists in the {a['provenance']}", f"worst severity {a['worst']}"]})
@@ -342,12 +346,29 @@ def main():
                       "compatibility": "no change to the image (nothing to upgrade or remove without breaking runtime packages)",
                       "rollback": "not applicable (no change); re-run the scan when a fix is published",
                       "reasons": ["no fixed version is available (status 'affected')", "the library is linked by launched robot runtime packages that are needed"]})
+    # unique CVE IDs per action: each ID is listed once (with the libraries it affects) and counted once across all actions
+    claimed = set()
+    for t in tiers:
+        libs = collections.defaultdict(set)
+        if t["tier"] == 1:
+            for i in t["cve_ids"]:
+                libs[i].add(t["package"])
+        else:
+            for it in t["items"]:
+                for i in it["cve_ids"]:
+                    libs[i].add(it["package"])
+        ids = [i for i in sorted(libs) if i not in claimed]
+        t["cve_ids"], t["cve_libs"] = ids, {i: sorted(libs[i]) for i in ids}
+        t["cve_also_in_other_action"] = sorted(set(libs) - set(ids))
+        claimed |= set(ids)
+        t["cves_covered" if t["tier"] == 3 else "cves_removed"] = len(ids)
     n1 = sum(t["cves_removed"] for t in tiers if t["tier"] == 1)
     n2 = sum(t["cves_removed"] for t in tiers if t["tier"] == 2)
     n3 = sum(t.get("cves_covered", 0) for t in tiers if t["tier"] == 3)
     mit = any(t["kind"] == "mitigate" for t in tiers)
-    summary = {"reachable": len([1 for c in cves if c["runtime"] and c["reachable"]]), "upgrade": n1,
+    summary = {"reachable": n_reach, "reachable_pairs": pairs["reachable"], "upgrade": n1,
                "removable": 0 if mit else n2, "mitigate": n2 if mit else 0, "monitor": n3}
+    assert n1 + n2 + n3 == n_reach, f"tiers {n1}+{n2}+{n3} != unique reachable {n_reach}"
     plan = {"summary": summary, "actions": tiers, "needed_by_rviz": needed_by, "rviz_launch_files": rviz_launch}
     funnel["plan_summary"] = summary
     actions.sort(key=lambda a: (-a["score_total"], a["package"]))
@@ -355,7 +376,7 @@ def main():
     funnel["no_fix_cves"] = sum(1 for c in cves if c["runtime"] and c["reachable"] and not c["fixed"])
     (OUT / "cves.json").write_text(json.dumps(cves, indent=1))
     (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber, "ros_links_all": ros_links_all, "actions": actions[:10], "no_fix": nofix, "plan": plan}, indent=1))
-    print(f"funnel: {len(cves)} CVEs -> {n_tree} in robot's tree -> {n_rt} runtime -> {n_reach} reachable -> top 10")
+    print(f"funnel (unique CVE IDs): {funnel['total']} CVEs -> {n_tree} in robot's tree -> {n_rt} runtime -> {n_reach} reachable | (CVE,library) pairs: {pairs}")
     print(f"launch seeds: {len(seeds)} pkgs; launched (recursive, in image): {len(reach['launched_pkgs'])}; binaries ldd'd: {reach['n_binaries']}; "
           f"linked debs: {len(linked)}; python-imported debs: {len(imported)}")
     for t in top:
