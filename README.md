@@ -22,7 +22,7 @@ AI verdicts need a local Ollama on `127.0.0.1:11435` (e.g. `OLLAMA_HOST=127.0.0.
 *workspace root* = a TurtleBot3 package itself · *direct* / *transitive* = reached from a TurtleBot3 package by one / several dependency hops · *base image only* = present in the image, but no TurtleBot3 dependency path leads to it.
 
 ## Graph legend / blast radius
-orange = TurtleBot3 workspace · blue = ROS packages in the image (size = build-time blast radius) · red = suspicious/planted · **amber ring = a runtime ROS package (reached via depend/exec_depend/build_export_depend) whose OWN executables/libraries link (ldd, including linked libraries) a library with runtime CVEs.** Ubiquitous base libraries (libc6, libstdc++6, libgcc-s1, libpython3.12*) are ignored for the ring only; their CVEs stay in the CVE list and funnel.
+orange = TurtleBot3 workspace · blue = ROS packages in the image (size = build-time blast radius) · red = suspicious/planted · **amber ring = a runtime ROS package (reached via depend/exec_depend/build_export_depend) whose OWN executables/libraries link DIRECTLY (readelf `NEEDED` entries, not the transitive ldd chain) a library with runtime CVEs.** Ubiquitous base libraries (libc6, libstdc++6, libgcc-s1, libpython3.12*) are ignored for the ring only; their CVEs stay in the CVE list and funnel.
 Blast radius = how many of the 12 TurtleBot3 workspace packages depend on a package, **build-time** (all dependency types) and **runtime** (depend/exec_depend/build_export_depend). Build-tool compromise is how the SolarWinds and XZ Utils attacks worked, so build-time hubs matter.
 
 ## Detection rules (suspicious.py)
@@ -30,6 +30,9 @@ unexpected new dependency · typosquat (edit distance <= 2 of a real package, or
 
 ## CVE prioritisation
 Exposure: runtime (reachable via exec/depend/export/apt-Depends edges) vs build/dev-only (`-dev`, headers, compilers, build/test-only paths) vs base image only. Reachability: C/C++ library in the `ldd` closure of binaries of the packages started by the TurtleBot3 launch files (resolved with `dpkg -S` inside the image), or Python modules imported by those nodes. Provenance: Ubuntu / ROS apt repo / PyPI / unknown. Plus severity and fix availability. Top 10 shows at most 3 CVEs per package.
+
+## Top 10 fix actions
+Runtime + reachable CVEs that have a fixed version are grouped by the package to upgrade (target = highest fixed version), ranked by total priority score, with the CVE IDs inside each action. CVEs without a fixed version are listed separately. **Recommendation only; fixing happens on Day 2 with human approval.**
 
 ## What's risky table
 Sorted by Guardian priority, not raw Trivy severity: suspicious findings first, then runtime + reachable CVEs, then the rest by score. Columns: priority, exposure (runtime / build/dev-only / base image only), reachable (yes/no), raw Trivy severity. Click a row for verified evidence and the priority reasons. `linux-libc-dev` rows rank low ("build-only kernel headers").

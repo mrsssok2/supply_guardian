@@ -93,9 +93,11 @@ for p in sorted(os.listdir(SHARE)):
         try: head = open(t, "rb").read(4)
         except Exception: continue
         if head != b"\x7fELF": continue
+        needed = set(re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", subprocess.run(["readelf", "-d", t], capture_output=True, text=True).stdout))
         out = subprocess.run(["ldd", t], capture_output=True, text=True).stdout
-        for m in re.finditer(r"=>\s*(/\S+)", out):
-            allpaths.setdefault(os.path.realpath(m.group(1)), set()).add((p, os.path.basename(t)))
+        for m in re.finditer(r"(\S+)\s+=>\s*(/\S+)", out):   # DIRECT links only: soname listed in the file's own NEEDED entries
+            if m.group(1) in needed:
+                allpaths.setdefault(os.path.realpath(m.group(2)), set()).add((p, os.path.basename(t)))
 o2 = owners(allpaths)
 for deb, ps in o2.items():
     for path in ps:
@@ -251,13 +253,55 @@ def main():
                 for d, b in debs.items() if d in by_deb and not BASE_LIBS.match(d)}
         if libs:
             ros_amber[pkg] = libs
+    # ---- fix actions: runtime+reachable CVEs grouped by the package to upgrade (recommendation only)
+    def gt(a, b):
+        return subprocess.run(["dpkg", "--compare-versions", a, "gt", b]).returncode == 0
+    groups = collections.defaultdict(list)
+    for c in cves:
+        if c["runtime"] and c["reachable"]:
+            groups[c["package"]].append(c)
+    actions = []
+    for pkg, cs in groups.items():
+        fixable = [c for c in cs if c["fixed"]]
+        if not fixable:
+            continue
+        target = fixable[0]["fixed"].split(",")[0].strip()
+        for c in fixable[1:]:
+            v = c["fixed"].split(",")[0].strip()
+            if gt(v, target):
+                target = v
+        users = sorted(ros_links_all.get(pkg, []))
+        actions.append({"package": pkg, "installed": cs[0]["installed"], "upgrade_to": target, "layer": cs[0]["layer"],
+                        "cve_count": len(fixable), "unfixed_cve_count": len(cs) - len(fixable),
+                        "score_total": round(sum(c["score"] for c in fixable), 1),
+                        "worst": max((c["severity"] for c in fixable), key=lambda x: SEV.get(x, 0)),
+                        "used_by": users, "used_by_count": len(users), "provenance": cs[0]["provenance"],
+                        "reachability": cs[0]["reachability"],
+                        "cves": [{"id": c["id"], "severity": c["severity"], "fixed": c["fixed"], "score": c["score"]}
+                                 for c in sorted(fixable, key=lambda c: -c["score"])]})
+    nofix = []
+    for pkg, cs in groups.items():
+        un = [c for c in cs if not c["fixed"]]
+        if un:
+            nofix.append({"package": pkg, "installed": un[0]["installed"], "cve_count": len(un), "worst": max((c["severity"] for c in un), key=lambda x: SEV.get(x, 0)),
+                          "score_total": round(sum(c["score"] for c in un), 1), "used_by_count": len(ros_links_all.get(pkg, [])),
+                          "statuses": sorted({c["status"] for c in un if c["status"]}), "cve_ids": [c["id"] for c in un]})
+    nofix.sort(key=lambda a: (-a["score_total"], a["package"]))
+    actions.sort(key=lambda a: (-a["score_total"], a["package"]))
+    funnel["actions_total"] = len(actions)
+    funnel["no_fix_cves"] = sum(1 for c in cves if c["runtime"] and c["reachable"] and not c["fixed"])
     (OUT / "cves.json").write_text(json.dumps(cves, indent=1))
-    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber, "ros_links_all": ros_links_all}, indent=1))
+    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber, "ros_links_all": ros_links_all, "actions": actions[:10], "no_fix": nofix}, indent=1))
     print(f"funnel: {len(cves)} CVEs -> {n_tree} in robot's tree -> {n_rt} runtime -> {n_reach} reachable -> top 10")
     print(f"launch seeds: {len(seeds)} pkgs; launched (recursive, in image): {len(reach['launched_pkgs'])}; binaries ldd'd: {reach['n_binaries']}; "
           f"linked debs: {len(linked)}; python-imported debs: {len(imported)}")
     for t in top:
         print(f"  {t['score']:5} {t['id']:16} {t['severity']:8} {t['package']:28} {t['exposure']:15} {t['reachability'][:50]}")
+    print(f"fix actions: {len(actions)} (showing 10); runtime+reachable CVEs without a fix: {funnel['no_fix_cves']}")
+    for a in actions[:10]:
+        print(f"  upgrade {a['package']} {a['installed']} -> {a['upgrade_to']}: fixes {a['cve_count']} reachable CVEs, used by {a['used_by_count']} ROS pkgs, score {a['score_total']}")
+    for n in nofix[:5]:
+        print(f"  no fix: {n['package']} {n['installed']}: {n['cve_count']} CVEs {n['statuses']}")
     print(f"ROS packages with runtime CVEs in libs their own binaries link: {len(ros_amber)}")
     for k in ("ament_cmake", "geometry_msgs"):
         print(" ", k, "amber" if k in ros_amber else "not amber", "| own binaries link:", len(reach["own_links"].get(k, {})), "debs")

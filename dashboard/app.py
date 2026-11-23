@@ -136,7 +136,7 @@ with tab_in:
             "network.once('stabilizationIterationsDone', function(){ network.setOptions({physics:{enabled:false}}); network.fit(); });\n return network;")
         components.html(html, height=580)
         st.caption("orange = TurtleBot3 workspace, blue = ROS packages in the image (size = build-time blast radius), red = suspicious/planted, "
-                   "amber border = runtime CVEs in a library that the package's OWN executables/libraries link (ldd, incl. their linked libraries). "
+                   "amber border = runtime CVEs in a library that the package's OWN executables/libraries link DIRECTLY (readelf NEEDED entries, not the transitive ldd chain). "
                    "Ubiquitous base libraries (libc6, libstdc++6, libgcc-s1, libpython3.12*) are ignored for the amber ring (their CVEs stay in the CVE list and funnel). "
                    "Layout is frozen after stabilisation; drag nodes to rearrange.")
         hc1, hc2 = st.columns(2)
@@ -186,21 +186,31 @@ with tab_chg:
 with tab_risk:
     if prio:
         fn = prio["funnel"]
-        st.subheader("Top 10 CVEs that matter")
+        st.subheader("Top 10 fix actions")
+        acts = prio.get("actions", [])
         st.markdown(f"**{fn['total']:,} CVEs → {fn['in_robot_tree']:,} in the robot's tree → {fn['runtime']:,} runtime → "
-                    f"{fn['reachable']:,} reachable → top 10**")
+                    f"{fn['reachable']:,} reachable → {len(acts)} fix action(s)** (+ {fn.get('no_fix_cves', 0)} reachable CVEs with no fixed version)")
         fc = st.columns(5)
-        for col, (lab, k) in zip(fc, [("All CVEs", "total"), ("In robot's tree", "in_robot_tree"), ("Runtime", "runtime"), ("Reachable", "reachable"), ("Shown", "top")]):
-            col.metric(lab, f"{fn[k]:,}")
+        for col, (lab, k) in zip(fc, [("All CVEs", "total"), ("In robot's tree", "in_robot_tree"), ("Runtime", "runtime"), ("Reachable", "reachable"), ("Fix actions", "actions_total")]):
+            col.metric(lab, f"{fn.get(k, 0):,}")
         st.caption("In tree = a TurtleBot3 dependency path reaches the package · runtime = not build/dev-only · reachable = linked (ldd) by "
                    f"binaries of the {len(fn['launched_packages'])} packages started by the TurtleBot3 launch files ({fn['binaries_scanned']} binaries scanned) or imported by Python nodes. "
-                   "Max 3 CVEs per package.")
-        for i, t in enumerate(prio["top10"], 1):
-            with st.expander(f"{i}. {t['id']} · {t['severity']} · {t['package']} {t['installed']} · priority {t['score']}"):
-                st.markdown("**Why it ranks here:** " + " · ".join(t["priority_reasons"]))
-                st.markdown(f"Exposure: **{t['exposure']}** · Reachability: {t['reachability']} · Provenance: {t['provenance']}")
-                if t["path"]:
-                    st.markdown("Path: " + " → ".join(f"`{p}`" for p in t["path"]))
+                   "Actions group the runtime + reachable CVEs that have a fixed version by the package to upgrade, ranked by total priority score. "
+                   "**This is a recommendation only — fixing happens on Day 2 with human approval.**")
+        for i, t in enumerate(acts, 1):
+            with st.expander(f"{i}. Upgrade {t['package']} {t['installed']} → {t['upgrade_to']} · fixes {t['cve_count']} reachable CVEs · "
+                             f"directly linked by {t['used_by_count']} ROS packages · total priority {t['score_total']}"):
+                st.markdown(f"Worst severity: **{t['worst']}** · provenance: {t['provenance']} · reachability: {t['reachability']}"
+                            + (f" · {t['unfixed_cve_count']} more reachable CVEs in this package have no fix yet" if t["unfixed_cve_count"] else ""))
+                st.markdown("CVEs fixed: " + ", ".join(f"`{c['id']}` ({c['severity'].lower()}, score {c['score']})" for c in t["cves"]))
+                if t["used_by"]:
+                    st.markdown("Used by: " + ", ".join(f"`{u}`" for u in t["used_by"][:25]) + (" …" if len(t["used_by"]) > 25 else ""))
+        nf = prio.get("no_fix", [])
+        if nf:
+            with st.expander(f"No fix available yet: {sum(n['cve_count'] for n in nf)} reachable CVEs in {len(nf)} packages (monitor / mitigate, nothing to upgrade to)"):
+                for n in nf:
+                    st.markdown(f"- `{n['package']}` {n['installed']} — {n['cve_count']} CVEs (worst {n['worst']}, status {', '.join(n['statuses']) or '?'}), "
+                                f"directly linked by {n['used_by_count']} ROS packages: " + ", ".join(f"`{x}`" for x in n["cve_ids"]))
         st.divider()
         st.subheader("All risks")
     rows = []
