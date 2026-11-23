@@ -1,0 +1,5 @@
+.venv/
+out/
+__pycache__/
+# target/ is its own git repo (branches main + planted); it is not embedded here
+target/
