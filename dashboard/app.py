@@ -51,7 +51,7 @@ tab_in, tab_chg, tab_risk = st.tabs(["What's inside", "What changed", "What's ri
 with tab_in:
     df = pd.DataFrame(components_)
     df = df[df["kind"] != "rosdep-key-unresolved"]
-    df["path"] = df["path"].apply(lambda p: " → ".join(p) if p else "(not reachable from turtlebot3)")
+    df["path"] = df["path"].apply(lambda p: " → ".join(p) if p else "(base image only, not used by TurtleBot3)")
     left, right = st.columns([1, 1])
     with left:
         st.subheader("Components per layer")
@@ -86,21 +86,45 @@ with tab_in:
         G = nx.node_link_graph(graph, edges="edges")
         roots = [n for n, d in G.nodes(data=True) if d.get("layer") == "source" and d.get("kind") == "ros-package"
                  and d["name"].startswith("turtlebot3")]
-        net = Network(height="480px", width="100%", directed=True, bgcolor="#0e1117", font_color="white")
+        net = Network(height="560px", width="100%", directed=True, bgcolor="#0e1117", font_color="white")
         colour = {"source": "#ff7f0e", "ros": "#1f77b4", "apt": "#2ca02c", "pip": "#9467bd"}
+        AMBER, RED = "#ffc107", "#e53935"
+        reach_ros = {c["ros_package"] for c in cves if c.get("reachable") and c.get("ros_package")}
         sub = set(roots)
         for r in roots:
             sub.update(s for s in G.successors(r) if G.nodes[s].get("layer") in ("source", "ros"))
         for n in sub:
             d = G.nodes[n]
-            net.add_node(n, label=d["name"], color=colour.get(d["layer"], "#888"),
-                         size=22 if n in roots else 12, title=f"{d['layer']} {d.get('version', '')}")
+            has_cve = d["name"] in reach_ros
+            net.add_node(n, label=d["name"], shape="dot", size=28 if n in roots else 18,
+                         color={"background": colour.get(d["layer"], "#888"), "border": AMBER if has_cve else colour.get(d["layer"], "#888"),
+                                "highlight": {"background": colour.get(d["layer"], "#888"), "border": "#fff"}},
+                         borderWidth=5 if has_cve else 1, font={"size": 20, "color": "#ffffff", "strokeWidth": 3, "strokeColor": "#0e1117"},
+                         title=f"{d['layer']} {d.get('version', '')}" + (" - has reachable CVEs" if has_cve else ""))
         for u, w in G.edges(sub):
             if u in sub and w in sub:
-                net.add_edge(u, w)
-        net.toggle_physics(True)
-        components.html(net.generate_html(notebook=False), height=500)
-        st.caption("orange = workspace (source) packages, blue = ROS packages in the image")
+                net.add_edge(u, w, color="#888888")
+        # planted / suspicious packages from the findings (they do not exist on main, so not in graph.json)
+        for f in findings:
+            if f["type"] == "unexpected_dependency" and f.get("dep_path"):
+                owner, dep = f["dep_path"]
+                oid = next((n for n in sub if G.nodes[n]["name"] == owner), None)
+                if oid:
+                    net.add_node(f"sus:{dep}", label=dep, shape="dot", size=24, color={"background": RED, "border": "#ffffff"}, borderWidth=3,
+                                 font={"size": 20, "color": "#ffffff", "strokeWidth": 3, "strokeColor": "#0e1117"},
+                                 title=f"{f['risk']} - {f['type']} ({f['file']}:{f['line']})")
+                    net.add_edge(oid, f"sus:{dep}", color=RED, width=3)
+        net.set_options(json.dumps({
+            "physics": {"enabled": True, "solver": "forceAtlas2Based",
+                        "forceAtlas2Based": {"gravitationalConstant": -120, "springLength": 180, "springConstant": 0.05, "avoidOverlap": 1},
+                        "stabilization": {"enabled": True, "iterations": 200, "fit": True}},
+            "interaction": {"dragNodes": True, "hover": True}, "nodes": {"font": {"size": 20}}}))
+        html = net.generate_html(notebook=False).replace(
+            "return network;",
+            "network.once('stabilizationIterationsDone', function(){ network.setOptions({physics:{enabled:false}}); network.fit(); });\n return network;")
+        components.html(html, height=580)
+        st.caption("orange = TurtleBot3 workspace, blue = ROS packages in the image, red = suspicious/planted, amber border = has reachable CVEs "
+                   "(layout is frozen after stabilisation; drag nodes to rearrange)")
     except Exception as e:  # graph is a nicety, never block the demo
         st.info(f"Graph unavailable: {e}")
 
