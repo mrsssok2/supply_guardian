@@ -86,21 +86,27 @@ with tab_in:
         G = nx.node_link_graph(graph, edges="edges")
         roots = [n for n, d in G.nodes(data=True) if d.get("layer") == "source" and d.get("kind") == "ros-package"
                  and d["name"].startswith("turtlebot3")]
+        roots_set = set(roots)
+        blast = {n: len(nx.ancestors(G, n) & roots_set) for n, d in G.nodes(data=True) if d.get("layer") in ("ros", "source")}
+        Y = len(roots)
         net = Network(height="560px", width="100%", directed=True, bgcolor="#0e1117", font_color="white")
         colour = {"source": "#ff7f0e", "ros": "#1f77b4", "apt": "#2ca02c", "pip": "#9467bd"}
         AMBER, RED = "#ffc107", "#e53935"
-        reach_ros = {c["ros_package"] for c in cves if c.get("reachable") and c.get("ros_package")}
+        amber = prio.get("ros_amber", {})  # ROS package -> libs its OWN binaries link (ldd) that carry runtime CVEs
         sub = set(roots)
         for r in roots:
             sub.update(s for s in G.successors(r) if G.nodes[s].get("layer") in ("source", "ros"))
         for n in sub:
             d = G.nodes[n]
-            has_cve = d["name"] in reach_ros
-            net.add_node(n, label=d["name"], shape="dot", size=28 if n in roots else 18,
+            has_cve = d["name"] in amber
+            br = blast.get(n, 0)
+            size = 30 if n in roots else (12 + 2.5 * br if d["layer"] == "ros" else 18)
+            net.add_node(n, label=d["name"], shape="dot", size=size,
                          color={"background": colour.get(d["layer"], "#888"), "border": AMBER if has_cve else colour.get(d["layer"], "#888"),
                                 "highlight": {"background": colour.get(d["layer"], "#888"), "border": "#fff"}},
                          borderWidth=5 if has_cve else 1, font={"size": 20, "color": "#ffffff", "strokeWidth": 3, "strokeColor": "#0e1117"},
-                         title=f"{d['layer']} {d.get('version', '')}" + (" - has reachable CVEs" if has_cve else ""))
+                         title=f"{d['name']} ({d['layer']} {d.get('version', '')})\nblast radius: {br} of {Y} TurtleBot3 packages depend on it (directly or transitively)"
+                         + ("\nruntime CVEs in libs its own binaries link: " + ", ".join(f"{k} ({v['cves']} CVEs, worst {v['worst']}) via {v['binary']}" for k, v in list(amber[d["name"]].items())[:4]) if has_cve else ""))
         for u, w in G.edges(sub):
             if u in sub and w in sub:
                 net.add_edge(u, w, color="#888888")
@@ -110,9 +116,10 @@ with tab_in:
                 owner, dep = f["dep_path"]
                 oid = next((n for n in sub if G.nodes[n]["name"] == owner), None)
                 if oid:
+                    sbr = len((nx.ancestors(G, oid) | {oid}) & roots_set)
                     net.add_node(f"sus:{dep}", label=dep, shape="dot", size=24, color={"background": RED, "border": "#ffffff"}, borderWidth=3,
                                  font={"size": 20, "color": "#ffffff", "strokeWidth": 3, "strokeColor": "#0e1117"},
-                                 title=f"{f['risk']} - {f['type']} ({f['file']}:{f['line']})")
+                                 title=f"{dep}\n{f['risk']} - {f['type']} ({f['file']}:{f['line']})\nblast radius: {sbr} of {Y} TurtleBot3 packages would depend on it")
                     net.add_edge(oid, f"sus:{dep}", color=RED, width=3)
         net.set_options(json.dumps({
             "physics": {"enabled": True, "solver": "forceAtlas2Based",
@@ -123,8 +130,13 @@ with tab_in:
             "return network;",
             "network.once('stabilizationIterationsDone', function(){ network.setOptions({physics:{enabled:false}}); network.fit(); });\n return network;")
         components.html(html, height=580)
-        st.caption("orange = TurtleBot3 workspace, blue = ROS packages in the image, red = suspicious/planted, amber border = has reachable CVEs "
-                   "(layout is frozen after stabilisation; drag nodes to rearrange)")
+        st.caption("orange = TurtleBot3 workspace, blue = ROS packages in the image (size = blast radius), red = suspicious/planted, "
+                   "amber border = runtime CVEs in a library that the package's OWN executables/libraries link (ldd) · layout is frozen after stabilisation; drag nodes to rearrange")
+        hubs = sorted(((blast[n], len(nx.ancestors(G, n)), d["name"]) for n, d in G.nodes(data=True) if d.get("layer") == "ros"), reverse=True)[:5]
+        st.markdown("**Top 5 hubs (blast radius)**")
+        for k, _, name in hubs:
+            st.markdown(f"- `{name}` — if this package were compromised, **{k} of {Y}** TurtleBot3 packages would be affected")
+        st.caption(f"Blast radius = number of the {Y} TurtleBot3 workspace packages that depend on a package directly or transitively (all dependency types). Ties are broken by total dependents in the graph.")
     except Exception as e:  # graph is a nicety, never block the demo
         st.info(f"Graph unavailable: {e}")
 
@@ -241,8 +253,9 @@ with tab_risk:
                 if c.get("title"):
                     st.write(c["title"])
                 st.markdown("Path from TurtleBot3: " + (" → ".join(f"`{p}`" for p in c["path"]) if c["path"] else "_not reachable in the graph_"))
-                if c.get("ros_package"):
-                    st.write(f"Nearest ROS package on path: `{c['ros_package']}`")
+                linkers = sorted(k for k, v in prio.get("ros_amber", {}).items() if c["package"] in v)
+                if linkers:
+                    st.write(f"ROS packages whose own binaries link `{c['package']}` ({len(linkers)}): " + ", ".join(f"`{x}`" for x in linkers[:12]) + (" …" if len(linkers) > 12 else ""))
                 if c.get("url"):
                     st.write(c["url"])
         with e2:

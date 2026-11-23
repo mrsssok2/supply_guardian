@@ -84,7 +84,23 @@ def owners(paths):
     return res
 linked = {k: sorted({libs[x] for x in v if x in libs})[:3] for k, v in owners(libs).items()}
 imported = {k: sorted({pyimports[x] for x in v if x in pyimports})[:3] for k, v in owners(pyimports).items()}
-print(json.dumps({"launched_pkgs": sorted(seen), "n_binaries": nexe, "linked": linked, "imported": imported}))
+own = {}   # ROS package -> {deb: example binary}; only the package's OWN executables (lib/<pkg>/*) and libraries (lib/lib<pkg>*.so*)
+allpaths = {}
+for p in sorted(os.listdir(SHARE)):
+    files = [x for x in glob.glob(f"{LIB}/{p}/*") if os.path.isfile(x)] + glob.glob(f"{LIB}/lib{p}*.so*")
+    for t in files:
+        try: head = open(t, "rb").read(4)
+        except Exception: continue
+        if head != b"\x7fELF": continue
+        out = subprocess.run(["ldd", t], capture_output=True, text=True).stdout
+        for m in re.finditer(r"=>\s*(/\S+)", out):
+            allpaths.setdefault(os.path.realpath(m.group(1)), set()).add((p, os.path.basename(t)))
+o2 = owners(allpaths)
+for deb, ps in o2.items():
+    for path in ps:
+        for (pkg, binary) in allpaths.get(path, ()):
+            own.setdefault(pkg, {}).setdefault(deb, binary)
+print(json.dumps({"own_links": own, "launched_pkgs": sorted(seen), "n_binaries": nexe, "linked": linked, "imported": imported}))
 '''
 
 
@@ -218,13 +234,30 @@ def main():
             break
     top = [{k: c[k] for k in ("id", "package", "installed", "severity", "fixed", "score", "exposure", "reachability",
                               "provenance", "priority_reasons", "path")} for c in picked]
+    # ROS package -> runtime CVEs in libraries that ITS OWN binaries link (ldd), only for runtime (exec/depend) packages
+    SEV = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 0}
+    by_deb = collections.defaultdict(list)
+    for c in cves:
+        if c["runtime"]:
+            by_deb[c["package"]].append(c)
+    ros_amber = {}
+    for pkg, debs in reach["own_links"].items():
+        if f"ros:{pkg}" not in rt:
+            continue
+        libs = {d: {"binary": b, "cves": len(by_deb[d]), "worst": max(by_deb[d], key=lambda c: SEV.get(c["severity"], 0))["severity"]}
+                for d, b in debs.items() if d in by_deb}
+        if libs:
+            ros_amber[pkg] = libs
     (OUT / "cves.json").write_text(json.dumps(cves, indent=1))
-    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top}, indent=1))
+    (OUT / "priority.json").write_text(json.dumps({"funnel": funnel, "top10": top, "ros_amber": ros_amber}, indent=1))
     print(f"funnel: {len(cves)} CVEs -> {n_tree} in robot's tree -> {n_rt} runtime -> {n_reach} reachable -> top 10")
     print(f"launch seeds: {len(seeds)} pkgs; launched (recursive, in image): {len(reach['launched_pkgs'])}; binaries ldd'd: {reach['n_binaries']}; "
           f"linked debs: {len(linked)}; python-imported debs: {len(imported)}")
     for t in top:
         print(f"  {t['score']:5} {t['id']:16} {t['severity']:8} {t['package']:28} {t['exposure']:15} {t['reachability'][:50]}")
+    print(f"ROS packages with runtime CVEs in libs their own binaries link: {len(ros_amber)}")
+    for k in ("ament_cmake", "geometry_msgs"):
+        print(" ", k, "amber" if k in ros_amber else "not amber", "| own binaries link:", len(reach["own_links"].get(k, {})), "debs")
     l = [c for c in cves if c["package"] == "linux-libc-dev"]
     if l:
         print("linux-libc-dev:", len(l), "CVEs, max score", max(c["score"] for c in l), "|", l[0]["priority_reasons"])
