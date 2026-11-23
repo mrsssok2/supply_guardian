@@ -50,7 +50,7 @@ if not components_:
     st.error("No data in out/. Run ./run.sh (or guardian/discover.py then guardian/suspicious.py).")
     st.stop()
 
-tab_in, tab_chg, tab_risk = st.tabs(["What's inside", "What changed", "What's risky"])
+tab_in, tab_chg, tab_risk, tab_val = st.tabs(["What's inside", "What changed", "What's risky", "Validation"])
 
 # ------------------------------------------------------------------ inside
 with tab_in:
@@ -363,3 +363,58 @@ with tab_risk:
                 st.warning("No AI verdict for this finding (only critical/high are analysed; run guardian/agent.py).")
             else:
                 st.write("AI analysis covers suspicious findings only, not CVE rows.")
+
+
+# ------------------------------------------------------------------ validation (Day 2 stage A: Gazebo mission main vs planted)
+with tab_val:
+    st.subheader("Gazebo mission validation: main vs planted")
+    st.caption("One NavigateToPose goal from (-2.0, -0.5) to (1.6, -0.5) in the TurtleBot3 world with ONE box on the straight path that is NOT in the static map, "
+               "so only the LiDAR can see it. Headless Gazebo + Nav2 with the image's TurtleBot3 params; PASS = goal reached AND no collision; 120 s wall-clock limit. "
+               "Distances come from Gazebo ground truth (5 Hz), collisions from the box's contact sensor or a distance below the robot radius (0.105 m).")
+    files = sorted(OUT.glob("mission_*.json")) or sorted((ROOT / "results" / "day2_stageA").glob("mission_*.json"))
+    runs = [json.loads(f.read_text()) for f in files]
+    if not runs:
+        st.info("No mission results yet. Run: scripts/build_target_image.sh main main; scripts/mission_test.py --image tb3-target:main --label main_1")
+    else:
+        def verdict(d):
+            return d.get("verdict") or ("PASS" if d["result"] == "reached" and not d["collision"] else "FAIL")
+        groups = {"main": [r for r in runs if r["label"].startswith("main")], "planted": [r for r in runs if r["label"].startswith("planted")]}
+        def agg(rs):
+            if not rs:
+                return {}
+            mins = [r["min_distance_to_box_m"] for r in rs if r.get("min_distance_to_box_m") is not None]
+            return {"runs": len(rs), "PASS": f"{sum(verdict(r) == 'PASS' for r in rs)}/{len(rs)}",
+                    "results": ", ".join(r["result"] for r in rs), "collisions": f"{sum(bool(r['collision']) for r in rs)}/{len(rs)}",
+                    "closest approach to box (m)": min(mins) if mins else None,
+                    "max linear speed (m/s)": max(r["max_linear_speed_mps"] or 0 for r in rs),
+                    "time to finish, sim s (per run)": ", ".join(str(r["time_sim_s"]) for r in rs),
+                    "final distance to goal (m, per run)": ", ".join(str(r.get("distance_to_goal_gt_m")) for r in rs)}
+        a_main, a_pl = agg(groups["main"]), agg(groups["planted"])
+        c1, c2 = st.columns(2)
+        c1.metric("main", a_main.get("PASS", "-") + " PASS")
+        c2.metric("planted", a_pl.get("PASS", "-") + " PASS")
+        keys = list(a_main or a_pl)
+        st.dataframe(pd.DataFrame({"main": [a_main.get(k, "-") for k in keys], "planted": [a_pl.get(k, "-") for k in keys]}, index=keys).astype(str), width="stretch")
+        rows_ = [{"run": r["label"], "image": r.get("image", ""), "verdict": verdict(r), "result": r["result"], "collision": r["collision"],
+                  "min distance to box (m)": r["min_distance_to_box_m"], "max speed (m/s)": r["max_linear_speed_mps"],
+                  "time wall/sim (s)": f"{r['time_wall_s']} / {r['time_sim_s']}", "final dist to goal (m)": r.get("distance_to_goal_gt_m"),
+                  "contact hits": r.get("contact_sensor_hits")} for r in runs]
+        st.markdown("**Every run**")
+        st.dataframe(pd.DataFrame(rows_), width="stretch", hide_index=True)
+        pl = groups["planted"]
+        if pl and not any(r["collision"] for r in pl) and all(verdict(r) == "FAIL" for r in pl):
+            st.warning("The planted configuration FAILED the mission but did NOT collide. With the costmap obstacle/voxel layers disabled and max speed raised to 0.9 m/s the robot "
+                       "could no longer plan around the box, but Nav2's collision monitor (a separate safety layer that reads /scan directly) stopped it 0.12 m short of the box "
+                       "(hundreds of 'approach ... away from collision' events in out/launch_planted_*.log) and the run timed out. The collision monitor is the only thing between this change and a crash.")
+        elif pl and any(r["collision"] for r in pl):
+            st.error("The planted configuration collided with the box.")
+        pc = ROOT / "results" / "day2_stageA" / "positive_control.txt"
+        if pc.exists():
+            with st.expander("Instrument check (positive control)"):
+                st.code(pc.read_text(), language="text")
+        shots = sorted(p for p in OUT.glob("*.png") if p.name.startswith(("gazebo_", "shot_")))
+        if shots:
+            for sp in shots:
+                st.image(str(sp), caption=sp.name)
+        else:
+            st.caption("No Gazebo screenshots: the runs are headless. `GUI=true scripts/mission_test.py ...` opens the Gazebo window through WSLg for a demo video.")

@@ -1,0 +1,6 @@
+Positive control (scripts/mission/positive_control.sh on tb3-target:main): robot driven straight into the box at 0.3 m/s, no Nav2.
+contact topic: /world/default/model/mission_box/link/link/sensor/contact/contact
+contact sensor 'collision' mentions: 31296
+ground-truth samples: 75, min distance to box: 0.038 m (burger body front is 0.038 m ahead of base_footprint), final x,y: (-0.788, -0.500)
+=> the contact sensor and the Gazebo ground-truth distance both register a real collision.
+Note: an earlier first run used odometry (world = spawn + odom) for the distance and reported a false "collision, 0.0 m"; odometry had drifted ~0.7 m from the true pose. The measurements now use Gazebo ground truth.

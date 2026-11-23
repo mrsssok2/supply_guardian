@@ -1,0 +1,40 @@
+{
+ "label": "main_1",
+ "image": "tb3-target:main",
+ "result": "reached",
+ "collision": false,
+ "min_distance_to_box_m": 0.744,
+ "max_linear_speed_mps": 0.3,
+ "time_wall_s": 60.7,
+ "time_sim_s": 57.6,
+ "goal": [
+  1.6,
+  -0.5
+ ],
+ "start": [
+  -2.0,
+  -0.5
+ ],
+ "box": [
+  -0.55,
+  -0.5
+ ],
+ "startup_s": 11.2,
+ "contact_topic": "/world/default/model/mission_box/link/link/sensor/contact/contact",
+ "nav2_result": "TaskResult.SUCCEEDED",
+ "contact_sensor_hits": 0,
+ "gt_samples": 382,
+ "final_position_gt": [
+  1.6,
+  -0.46
+ ],
+ "distance_to_goal_gt_m": 0.04,
+ "distance_source": "gazebo ground truth (5 Hz samples)",
+ "final_position": [
+  1.73,
+  -1.12
+ ],
+ "collision_basis": "contact sensor hits=0; min distance 0.744 m vs robot radius 0.105 m",
+ "verdict": "PASS",
+ "gui": false
+}

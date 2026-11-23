@@ -57,3 +57,13 @@ Sorted by Guardian priority, not raw Trivy severity: suspicious findings first, 
 
 ## Tools
 Trivy 0.76.2, Docker, git, Python (networkx, pandas, pyvis, Streamlit, PyYAML), Ollama (qwen3:1.7b).
+
+## Day 2, Stage A - Gazebo validation (branch `day2`)
+```bash
+scripts/build_target_image.sh main main        # colcon build inside a gurdy2/ros:jazzy container -> image tb3-target:main
+scripts/build_target_image.sh planted planted  # -> tb3-target:planted (nav2_param_utils / rclpy_utils removed from the build context, never executed;
+                                               #    their intended effect is applied as a labelled "simulated effect" step on a copy of the Nav2 params)
+scripts/mission_test.py --image tb3-target:main --label main_1      # PASS/FAIL, out/mission_main_1.json   (GUI=true for the WSLg window)
+```
+Mission: TurtleBot3 world (offline copy, `scripts/mission/mission_world.sdf`) + ONE 0.4 m box at (-0.55, -0.5) on the straight line start (-2, -0.5) -> goal (1.6, -0.5), not in the static map. One NavigateToPose goal, 120 s wall-clock limit, `--network none` container removed afterwards. Never run together with the gurdy2 stack (the script refuses).
+Results (4 runs, saved in `results/day2_stageA/`): see the dashboard "Validation" tab. Distances use Gazebo ground truth; the contact sensor and distance were validated with a positive control (`scripts/mission/positive_control.sh`). An earlier odometry-based distance gave a false collision and was dropped.

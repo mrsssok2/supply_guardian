@@ -1,0 +1,39 @@
+{
+ "label": "planted_1",
+ "image": "tb3-target:planted",
+ "result": "timeout",
+ "collision": false,
+ "min_distance_to_box_m": 0.124,
+ "max_linear_speed_mps": 0.9,
+ "time_wall_s": 120.1,
+ "time_sim_s": 117.4,
+ "goal": [
+  1.6,
+  -0.5
+ ],
+ "start": [
+  -2.0,
+  -0.5
+ ],
+ "box": [
+  -0.55,
+  -0.5
+ ],
+ "startup_s": 10.9,
+ "contact_topic": "/world/default/model/mission_box/link/link/sensor/contact/contact",
+ "contact_sensor_hits": 0,
+ "gt_samples": 911,
+ "final_position_gt": [
+  1.1,
+  0.28
+ ],
+ "distance_to_goal_gt_m": 0.93,
+ "distance_source": "gazebo ground truth (5 Hz samples)",
+ "final_position": [
+  1.42,
+  -0.92
+ ],
+ "collision_basis": "contact sensor hits=0; min distance 0.124 m vs robot radius 0.105 m",
+ "verdict": "FAIL",
+ "gui": false
+}
